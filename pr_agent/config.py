@@ -95,6 +95,7 @@ class RuntimeConfig:
     langfuse_host: str | None
     max_tokens_per_file_chunk: int
     max_llm_calls_per_run: int
+    analyze_concurrency: int
 
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
@@ -118,4 +119,11 @@ class RuntimeConfig:
             langfuse_host=os.environ.get("LANGFUSE_HOST"),
             max_tokens_per_file_chunk=int(os.environ.get("MAX_TOKENS_PER_FILE_CHUNK", "6000")),
             max_llm_calls_per_run=int(os.environ.get("MAX_LLM_CALLS_PER_RUN", "80")),
+            # Bounded fan-out for the analyze node. Default 4 is friendly
+            # to Anthropic's per-key RPM/RPD limits; capped at 8 to keep
+            # the agent in the rate-limit safe zone. Set to 1 to force
+            # sequential analysis (the pre-concurrency behaviour).
+            analyze_concurrency=max(
+                1, min(8, int(os.environ.get("ANALYZE_CONCURRENCY", "4")))
+            ),
         )
