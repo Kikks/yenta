@@ -14,21 +14,18 @@ Built for the [Numeo AI Product Engineering Challenge](https://github.com/numeo-
 
 ## Demo
 
-**Demo PR**: https://github.com/Insight7MVP/i7-frontend/pull/2475
+**Demo PR**: _link to be added — see the run notes below._
 
-The agent ran three times against this PR, leaving three real reviews:
+Yenta has been exercised end-to-end against multiple PRs across two modes. On each run she:
 
-| Run | Mode | Risk | Decision | What you'll see on GitHub |
-|---|---|---|---|---|
-| 1st | conservative | 28 | escalate | Summary review + **5 line comments** citing specific lines + **3 reviewers assigned** + one combined per-reviewer issue comment with @-mentions and focus list |
-| 2nd | conservative | 24 | auto-approve | Summary review only (no line comments, no reviewer assignments) |
-| 3rd | aggressive | 26 | auto-approve | Summary review with looser, more decisive tone |
+1. Fetches the PR + files + CODEOWNERS + recent committers
+2. Runs Haiku triage on every changed file (cheap pass — skips lockfiles, formatting, generated stubs)
+3. Runs Sonnet analyze on the files triage kept (cached system prompt → ~60% cheaper after the first call)
+4. Computes a deterministic risk score
+5. **Auto-approves quietly** when risk is under the mode threshold, or **escalates with line comments + reviewer assignments** when it isn't
+6. Captures every LLM call to Langfuse (prompt, model, output, tokens, cache hits, latency)
 
-The 1st vs 2nd review is the **iteration story**: I tightened the prompt to kill an over-speculative finding (the agent had complained that `getScoreChipClass` was "undefined" — a function it couldn't see because it's imported above the diff). The risk score dropped from 28 → 24 and the decision flipped from escalate → auto-approve on the same PR, deterministically.
-
-The 2nd vs 3rd review shows the mode flag in action on the same risk score: 24 escalates under the conservative threshold (25) but is well under the aggressive threshold (60).
-
-> The agent posts under `@kikks-i7` (a separate identity from the personal `@Kikks` it picks as a reviewer via git-blame fallback). Both are mine — calling this out because the agent treats them as separate people, which is the technically correct behavior absent a user-supplied identity map (see *Future work*).
+To reproduce the demo end-to-end, see the *How to run against any PR* section below.
 
 ---
 
@@ -75,14 +72,14 @@ python main.py <PR_URL> --mode {conservative|aggressive} [--dry-run]
 
 ```mermaid
 flowchart TD
-    A[CLI<br/>main.py] --> B[fetch<br/>PR meta, files,<br/>CODEOWNERS, blame]
-    B --> C[chunk<br/>per-file -> per-hunk if<br/>over token budget]
-    C --> T[triage <br/> Haiku per-chunk:<br/>review or skip?]
-    T --> D[analyze<br/>Sonnet on review chunks only<br/>cached system prompt<br/>structured JSON findings]
-    D --> E[aggregate<br/>deterministic risk score<br/>0-100+]
-    E --> F{decide<br/>risk &lt; threshold[mode]?}
-    F -->|yes| G[approve<br/>summary + APPROVE<br/>self-PR -> COMMENT]
-    F -->|no| H[escalate<br/>pick reviewers,<br/>line comments,<br/>ONE combined<br/>per-reviewer comment]
+    A["CLI<br/>main.py"] --> B["fetch<br/>PR meta · files · CODEOWNERS · blame"]
+    B --> C["chunk<br/>per-file, then per-hunk over budget"]
+    C --> T["triage<br/>Haiku per chunk:<br/>review or skip"]
+    T --> D["analyze<br/>Sonnet on kept chunks<br/>cached system prompt<br/>structured JSON findings"]
+    D --> E["aggregate<br/>deterministic risk score 0-100+"]
+    E --> F{"decide<br/>risk under mode threshold?"}
+    F -->|yes| G["approve<br/>summary + APPROVE<br/>self-PR downgrades to COMMENT"]
+    F -->|no| H["escalate<br/>pick reviewers<br/>top-5 line comments<br/>fold the rest in details block"]
     G --> I[GitHub]
     H --> I
 
@@ -299,11 +296,12 @@ The planning step (architecting + resolving spec ambiguity before code) was wher
 
 ---
 
-## How to reproduce the demo end-to-end
+## How to run against any PR
 
 1. Clone, install, fill `.env`
-2. `python main.py https://github.com/Insight7MVP/i7-frontend/pull/2475 --mode conservative --dry-run`
-3. Verify the structured dry-run report
-4. Drop `--dry-run` to post for real
-5. Open the PR on GitHub and confirm: review comment, optionally line comments + reviewer assignments
-6. Open the Langfuse trace and confirm every LLM call's prompt + output + tokens + cache hits are visible
+2. Pick any open GitHub PR you have write access to. Dry-run first:
+   `python main.py <PR_URL> --mode conservative --dry-run`
+3. Read the structured dry-run report. It shows exactly what Yenta would post — nothing leaves your terminal.
+4. Drop `--dry-run` to post for real.
+5. Open the PR on GitHub and confirm: review body, line comments (if any), reviewer assignments (if escalated).
+6. Open the Langfuse trace and confirm every LLM call's prompt + output + tokens + cache hits are visible.
