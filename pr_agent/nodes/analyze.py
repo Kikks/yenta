@@ -24,23 +24,28 @@ from ..state import DiffChunk, Finding, GraphState
 
 log = logging.getLogger(__name__)
 
-_PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "analyze_file.md"
+# Prompts are split system/user so the system half can be cached.
+# Anthropic prompt caching requires >=1024 cached tokens (Sonnet 4+);
+# analyze_system.md is intentionally padded with concrete do/don't
+# examples to clear that threshold AND improve review quality.
+_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "analyze_system.md"
+_USER_PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "analyze_user.md"
 
 
-def _load_prompt() -> str:
-    return _PROMPT_PATH.read_text(encoding="utf-8")
+def _load_prompts() -> tuple[str, str]:
+    return (
+        _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8"),
+        _USER_PROMPT_PATH.read_text(encoding="utf-8"),
+    )
 
 
-def _format_prompt(template: str, state: GraphState, chunk: DiffChunk, total_for_file: int) -> str:
+def _format_user_prompt(template: str, state: GraphState, chunk: DiffChunk, total_for_file: int) -> str:
     pr = state.pr_meta
     chunk_note = (
         "whole file"
         if chunk.hunk_index is None
         else f"hunk {chunk.hunk_index + 1} of {total_for_file}"
     )
-    # string.Template's $name substitution survives literal `{` / `}` in
-    # the prompt body — critical because the prompt contains a JSON
-    # schema example with raw braces.
     return Template(template).safe_substitute(
         owner=pr.owner if pr else "",
         repo=pr.repo if pr else "",
@@ -57,7 +62,7 @@ def _format_prompt(template: str, state: GraphState, chunk: DiffChunk, total_for
 def analyze_node(state: GraphState) -> dict[str, Any]:
     cfg = RuntimeConfig.from_env()
     llm = LLM(cfg)
-    template = _load_prompt()
+    system_prompt, user_template = _load_prompts()
 
     # Count chunks per file so we can label "hunk X of Y" in the prompt.
     per_file: dict[str, int] = {}
@@ -68,18 +73,21 @@ def analyze_node(state: GraphState) -> dict[str, Any]:
     errors: list[str] = []
 
     for chunk in state.chunks:
-        user_prompt = _format_prompt(template, state, chunk, per_file[chunk.file_path])
-        system = (
-            "You are a senior code reviewer. You respond with strict JSON only, "
-            "matching the schema in the user's instructions."
+        user_prompt = _format_user_prompt(
+            user_template, state, chunk, per_file[chunk.file_path]
         )
 
         try:
             raw = llm.complete(
-                system=system,
+                system=system_prompt,
                 user=user_prompt,
                 max_tokens=1500,
                 temperature=0.1,
+                # Cache the (large, static) system prompt. First call in
+                # the run pays cache-write (~1.25x normal); every call
+                # after pays cache-read (~0.1x normal) for the cached
+                # portion. Big win on per-file fan-out.
+                cache_system=True,
                 metadata={
                     "node": "analyze",
                     "file_path": chunk.file_path,

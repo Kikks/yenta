@@ -53,20 +53,43 @@ class LLM:
         user: str,
         max_tokens: int = 2000,
         temperature: float = 0.2,
+        cache_system: bool = False,
         metadata: dict[str, Any] | None = None,
     ) -> str:
+        """Single Anthropic call.
+
+        `cache_system=True` wraps the system prompt with an ephemeral
+        cache_control marker. Anthropic only actually caches if the
+        marked prefix is >= 1024 tokens (Sonnet 4+); otherwise it's a
+        no-op. Across per-file fan-out, the cached system prompt drops
+        input cost on the cached portion to 0.1x.
+        """
         if self._calls_made >= self._max_calls:
             raise LLMBudgetExceeded(
                 f"hit MAX_LLM_CALLS_PER_RUN={self._max_calls}; aborting to prevent runaway cost"
             )
         self._calls_made += 1
 
+        # Build the system param. When caching is on, the Anthropic API
+        # expects a list of content blocks where the cache marker lives
+        # on the block to be cached.
+        if cache_system:
+            system_param: Any = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        else:
+            system_param = system
+
         start = time.perf_counter()
         resp = self._client.messages.create(
             model=self._model,
             max_tokens=max_tokens,
             temperature=temperature,
-            system=system,
+            system=system_param,
             messages=[{"role": "user", "content": user}],
         )
         latency_ms = int((time.perf_counter() - start) * 1000)
@@ -74,10 +97,22 @@ class LLM:
         # Anthropic returns a list of content blocks; we only ask for text.
         text = "".join(block.text for block in resp.content if getattr(block, "type", "") == "text")
 
+        # Cache-aware usage. The Anthropic SDK exposes these as optional
+        # attrs that are present on cached responses; getattr() keeps us
+        # safe across SDK versions.
+        cache_creation = getattr(resp.usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = getattr(resp.usage, "cache_read_input_tokens", 0) or 0
         usage = {
             "input": resp.usage.input_tokens,
             "output": resp.usage.output_tokens,
-            "total": resp.usage.input_tokens + resp.usage.output_tokens,
+            "cache_creation_input": cache_creation,
+            "cache_read_input": cache_read,
+            "total": (
+                resp.usage.input_tokens
+                + resp.usage.output_tokens
+                + cache_creation
+                + cache_read
+            ),
         }
 
         # Push everything the spec asks for into Langfuse so a reviewer can
@@ -88,15 +123,21 @@ class LLM:
             model=self._model,
             usage=usage,
             model_parameters={"temperature": temperature, "max_tokens": max_tokens},
-            metadata={**(metadata or {}), "latency_ms": latency_ms},
+            metadata={
+                **(metadata or {}),
+                "latency_ms": latency_ms,
+                "cache_system": cache_system,
+            },
         )
 
         log.info(
-            "llm call #%d model=%s in=%d out=%d latency_ms=%d",
+            "llm call #%d model=%s in=%d out=%d cache_create=%d cache_read=%d latency_ms=%d",
             self._calls_made,
             self._model,
             usage["input"],
             usage["output"],
+            cache_creation,
+            cache_read,
             latency_ms,
         )
         return text
