@@ -125,24 +125,72 @@ def _focus_text(findings: list[Finding], paths: list[str]) -> str:
     return "Please review the PR end-to-end."
 
 
-def _line_comments_from_findings(state: GraphState) -> list[dict]:
+# Inline cap. CodeRabbit-style: only the top-N most-severe findings post
+# as line comments; everything else gets folded into a <details> block in
+# the review body so the PR stays scannable.
+MAX_INLINE_LINE_COMMENTS = 5
+
+_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def _split_findings_for_review(
+    findings: list[Finding], *, max_inline: int = MAX_INLINE_LINE_COMMENTS
+) -> tuple[list[Finding], list[Finding]]:
+    """Split findings into (top_for_inline, rest_for_fold).
+
+    Top: line-bearing findings, severity-sorted, capped to max_inline.
+    Rest: everything else (file-level findings without a line + the
+    line-bearing findings beyond the cap), still severity-sorted.
+    """
+    line_bearing = sorted(
+        (f for f in findings if f.line is not None),
+        key=lambda f: _SEVERITY_RANK.get(f.severity, 99),
+    )
+    file_level = [f for f in findings if f.line is None]
+    top = line_bearing[:max_inline]
+    rest = line_bearing[max_inline:] + file_level
+    rest.sort(key=lambda f: _SEVERITY_RANK.get(f.severity, 99))
+    return top, rest
+
+
+def _line_comments_from_findings(findings: list[Finding]) -> list[dict]:
     """Map findings to GitHub line-comment payloads.
 
-    GitHub only accepts comments on lines that are actually part of the
-    diff. We don't have the position mapping locally; PyGithub's
-    create_review with `line` + `side='RIGHT'` works for any line on the
-    new side of the diff. Findings without a line become PR-level
-    bullet points in the summary body (handled by escalate's main body).
+    Caller is responsible for trimming to the top-N — this function
+    renders whatever it's handed. PyGithub's create_review with `line`
+    + `side='RIGHT'` works for any line on the new side of the diff.
     """
     out: list[dict] = []
-    for f in state.findings:
+    for f in findings:
         if f.line is None:
             continue
         body = f"**{f.severity}/{f.category}** — {f.rationale}"
         if f.suggestion:
-            body += f"\n\n**Suggested fix:** {f.suggestion}"
+            body += f"\n\n_Suggested fix:_ {f.suggestion}"
         out.append({"path": f.file_path, "line": f.line, "side": "RIGHT", "body": body})
     return out
+
+
+def _folded_extras_block(extras: list[Finding]) -> str:
+    """Render the folded `<details>` section appended to the review body.
+
+    GitHub renders `<details><summary>...</summary>` as a click-to-expand
+    block — the same UX CodeRabbit uses for nitpicks. We use it for
+    findings beyond the inline cap so the review stays scannable.
+    """
+    if not extras:
+        return ""
+    lines = []
+    for f in extras:
+        loc = f"`{f.file_path}`" + (f":L{f.line}" if f.line else "")
+        lines.append(f"- **{f.severity}/{f.category}** {loc} — {f.rationale}")
+    return (
+        "\n\n<details>\n"
+        f"<summary>📂 {len(extras)} more finding{'s' if len(extras) != 1 else ''} "
+        "(click to expand)</summary>\n\n"
+        + "\n".join(lines)
+        + "\n\n</details>"
+    )
 
 
 def _render_summary(state: GraphState, llm: LLM) -> str:
@@ -215,10 +263,15 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
     # --- pick reviewers + craft per-reviewer focus ---
     assignments, _owners_by_file = _select_reviewers(state, viewer)
 
-    # --- build the main review (summary + line comments) ---
+    # --- build the main review (summary + line comments + folded extras) ---
+    # Split findings: top-N inline as line comments, rest fold into a
+    # <details> block in the review body. Keeps the PR scannable when the
+    # model finds 10+ things to flag.
+    top_findings, extra_findings = _split_findings_for_review(state.findings)
+    line_comments = _line_comments_from_findings(top_findings)
+
     summary = _render_summary(state, llm)
-    body = summary + _agent_signature(state)
-    line_comments = _line_comments_from_findings(state)
+    body = summary + _folded_extras_block(extra_findings) + _agent_signature(state)
 
     # ONE combined issue comment that addresses each reviewer in their
     # own section. The spec says "leave each one a comment explaining

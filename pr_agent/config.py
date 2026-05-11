@@ -38,13 +38,19 @@ class ModeProfile:
 
 MODE_PROFILES: dict[Mode, ModeProfile] = {
     "conservative": ModeProfile(
-        escalate_threshold=25,
+        # Was 25; raised to 50 so the agent feels self-sufficient by default.
+        # Most PRs now auto-approve; escalation fires only on genuine risk.
+        # Hard escalations (any critical finding, fork PR with findings)
+        # still override this threshold — see decide.py.
+        escalate_threshold=50,
         review_event_on_escalate="REQUEST_CHANGES",
         review_event_on_approve="APPROVE",
         min_severity_to_comment="low",
     ),
     "aggressive": ModeProfile(
-        escalate_threshold=60,
+        # Was 60; raised to 80. Aggressive should approve almost everything;
+        # escalation here is "this is genuinely scary, get a human now".
+        escalate_threshold=80,
         review_event_on_escalate="COMMENT",
         review_event_on_approve="APPROVE",
         min_severity_to_comment="medium",
