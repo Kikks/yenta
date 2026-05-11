@@ -228,9 +228,17 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
         for a in assignments
     ]
 
+    # GitHub returns 422 if you try to APPROVE or REQUEST_CHANGES on your
+    # own PR. Detect that up front and degrade to COMMENT, which still
+    # accepts line comments. Mirrors approve_node's behaviour.
+    event = profile.review_event_on_escalate
+    if viewer and state.pr_meta.author == viewer and event == "REQUEST_CHANGES":
+        log.warning("agent token owns the PR; downgrading REQUEST_CHANGES -> COMMENT")
+        event = "COMMENT"
+
     pending = {
         "pending_review_body": body,
-        "pending_review_event": profile.review_event_on_escalate,
+        "pending_review_event": event,
         "pending_line_comments": line_comments,
         "pending_reviewer_comments": reviewer_comments,
         "reviewers_assigned": assignments,
@@ -240,7 +248,7 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
         log.info(
             "DRY-RUN: skipping GitHub writes (would post %s review, %d line "
             "comments, request %d reviewers, %d per-reviewer comments)",
-            profile.review_event_on_escalate,
+            event,
             len(line_comments),
             len(assignments),
             len(reviewer_comments),
@@ -252,7 +260,7 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
         review = gh.post_review(
             pr,
             body=body,
-            event=profile.review_event_on_escalate,
+            event=event,
             comments=line_comments,
         )
         review_url = getattr(review, "html_url", state.pr_meta.url)
@@ -262,7 +270,7 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
         log.warning("review with line comments failed (%s); retrying body-only", e)
         try:
             review = gh.post_review(
-                pr, body=body, event=profile.review_event_on_escalate, comments=[]
+                pr, body=body, event=event, comments=[]
             )
             review_url = getattr(review, "html_url", state.pr_meta.url)
         except GithubException as e2:
