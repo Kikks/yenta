@@ -125,16 +125,18 @@ def _focus_text(findings: list[Finding], paths: list[str]) -> str:
     return "Please review the PR end-to-end."
 
 
-# Inline cap. CodeRabbit-style: only the top-N most-severe findings post
-# as line comments; everything else gets folded into a <details> block in
-# the review body so the PR stays scannable.
-MAX_INLINE_LINE_COMMENTS = 5
+# Default inline cap. CodeRabbit-style: only the top-N most-severe
+# findings post as line comments; everything else gets folded into a
+# <details> block in the review body so the PR stays scannable.
+# Runtime-overridable via `state.max_inline_line_comments` (CLI:
+# `--max-findings N`).
+DEFAULT_MAX_INLINE_LINE_COMMENTS = 5
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
 def _split_findings_for_review(
-    findings: list[Finding], *, max_inline: int = MAX_INLINE_LINE_COMMENTS
+    findings: list[Finding], *, max_inline: int = DEFAULT_MAX_INLINE_LINE_COMMENTS
 ) -> tuple[list[Finding], list[Finding]]:
     """Split findings into (top_for_inline, rest_for_fold).
 
@@ -267,7 +269,11 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
     # Split findings: top-N inline as line comments, rest fold into a
     # <details> block in the review body. Keeps the PR scannable when the
     # model finds 10+ things to flag.
-    top_findings, extra_findings = _split_findings_for_review(state.findings)
+    # The cap honours state.max_inline_line_comments (CLI: --max-findings),
+    # so operators can tune verbosity per-run without code edits.
+    top_findings, extra_findings = _split_findings_for_review(
+        state.findings, max_inline=state.max_inline_line_comments
+    )
     line_comments = _line_comments_from_findings(top_findings)
 
     summary = _render_summary(state, llm)

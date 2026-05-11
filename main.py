@@ -34,16 +34,31 @@ def _parse_pr_url(url: str) -> tuple[str, str, int]:
 
 
 @observe(name="pr_review_agent.run")
-def run(pr_url: str, mode: str, dry_run: bool = False) -> GraphState:
+def run(
+    pr_url: str,
+    mode: str,
+    dry_run: bool = False,
+    max_findings: int = 5,
+) -> GraphState:
     owner, repo, number = _parse_pr_url(pr_url)
     update_trace(
         name=f"pr-review/{owner}/{repo}#{number}",
         tags=[f"mode:{mode}", f"repo:{owner}/{repo}"] + (["dry-run"] if dry_run else []),
-        metadata={"pr_url": pr_url, "mode": mode, "dry_run": dry_run},
+        metadata={
+            "pr_url": pr_url,
+            "mode": mode,
+            "dry_run": dry_run,
+            "max_findings": max_findings,
+        },
     )
 
     graph = build_graph()
-    initial = GraphState(pr_url=pr_url, mode=mode, dry_run=dry_run)  # type: ignore[arg-type]
+    initial = GraphState(
+        pr_url=pr_url,
+        mode=mode,  # type: ignore[arg-type]
+        dry_run=dry_run,
+        max_inline_line_comments=max_findings,
+    )
     final = graph.invoke(initial)
     # LangGraph may return a dict or a GraphState depending on version.
     return final if isinstance(final, GraphState) else GraphState.model_validate(final)
@@ -74,7 +89,22 @@ def main(argv: Optional[list[str]] = None) -> int:
             "GitHub writes. Prints exactly what would be posted."
         ),
     )
+    p.add_argument(
+        "--max-findings",
+        type=int,
+        default=5,
+        metavar="N",
+        help=(
+            "Cap on the number of findings that post as inline line comments "
+            "on escalate. Anything beyond this is folded into a collapsed "
+            "`<details>` block in the review body. Default: 5."
+        ),
+    )
     args = p.parse_args(argv)
+
+    if args.max_findings < 1:
+        print("[config] --max-findings must be >= 1", file=sys.stderr)
+        return 2
 
     # Validate env upfront so we fail fast before any LLM/GH calls.
     try:
@@ -84,7 +114,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
 
     try:
-        state = run(args.pr_url, args.mode, dry_run=args.dry_run)
+        state = run(
+            args.pr_url,
+            args.mode,
+            dry_run=args.dry_run,
+            max_findings=args.max_findings,
+        )
     except Exception as e:  # surface a clean error; full trace is in logs
         log.exception("agent failed")
         print(f"[agent] failed: {e}", file=sys.stderr)

@@ -82,6 +82,11 @@ class GraphState(BaseModel):
     # review body, line comments, and reviewer assignments are still
     # populated so we can print them — but nothing posts.
     dry_run: bool = False
+    # Operator-tunable cap on inline line comments. Findings beyond this
+    # cap are folded into a `<details>` block in the review body. Default
+    # mirrors the previous hard-coded constant (5). Override via the
+    # `--max-findings` CLI flag.
+    max_inline_line_comments: int = 5
 
     # --- populated by fetch node ---
     pr_meta: Optional[PRMeta] = None
