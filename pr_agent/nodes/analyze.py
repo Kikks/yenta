@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from string import Template
 from typing import Any
 
 from ..config import RuntimeConfig
@@ -37,7 +38,10 @@ def _format_prompt(template: str, state: GraphState, chunk: DiffChunk, total_for
         if chunk.hunk_index is None
         else f"hunk {chunk.hunk_index + 1} of {total_for_file}"
     )
-    return template.format(
+    # string.Template's $name substitution survives literal `{` / `}` in
+    # the prompt body — critical because the prompt contains a JSON
+    # schema example with raw braces.
+    return Template(template).safe_substitute(
         owner=pr.owner if pr else "",
         repo=pr.repo if pr else "",
         pr_title=(pr.title if pr else "")[:200],

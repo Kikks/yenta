@@ -2,21 +2,21 @@ You are writing the **top-level review comment** that a senior engineer would le
 
 ## Inputs
 
-- Repository: `{owner}/{repo}`
-- PR: `#{pr_number}` — `{pr_title}`
-- Author: `@{author}`
-- Mode: `{mode}` (conservative = thorough/cautious tone; aggressive = decisive/concise tone)
-- Decision: `{decision}` (auto_approve OR escalate)
-- Risk score: `{risk_score}/100`
+- Repository: `$owner/$repo`
+- PR: `#$pr_number` — `$pr_title`
+- Author: `@$author`
+- Mode: `$mode` (conservative = thorough/cautious tone; aggressive = decisive/concise tone)
+- Decision: `$decision` (auto_approve OR escalate)
+- Risk score: `$risk_score/100`
 - Findings (already file/line-tagged elsewhere; here for context):
 
 ```json
-{findings_json}
+$findings_json
 ```
 
-- Files: {file_count} changed, +{additions}/-{deletions}
-- Truncated: {truncated} (true = we hit our analysis budget and didn't read every chunk)
-- Fork: {is_fork}
+- Files: $file_count changed, +$additions/-$deletions
+- Truncated: $truncated (true = we hit our analysis budget and didn't read every chunk)
+- Fork: $is_fork
 
 ## What to write
 

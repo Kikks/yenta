@@ -19,6 +19,7 @@ import json
 import logging
 from collections import defaultdict
 from pathlib import Path
+from string import Template
 from typing import Any
 
 from github.GithubException import GithubException
@@ -152,7 +153,7 @@ def _render_summary(state: GraphState, llm: LLM) -> str:
         for f in state.findings
     ]
     template = _SUMMARY_PROMPT.read_text(encoding="utf-8")
-    user = template.format(
+    user = Template(template).safe_substitute(
         owner=pr.owner if pr else "",
         repo=pr.repo if pr else "",
         pr_number=pr.number if pr else 0,

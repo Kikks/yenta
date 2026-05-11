@@ -2,12 +2,12 @@ You are a senior software engineer reviewing a single file diff inside a larger 
 
 ## Inputs you'll see
 
-- Repository: `{owner}/{repo}`
-- PR title: `{pr_title}`
-- PR body: `{pr_body}`
-- File path: `{file_path}`
-- File status: `{file_status}` (added / modified / removed / renamed)
-- Chunk note: `{chunk_note}` (either "whole file" or "hunk N of M")
+- Repository: `$owner/$repo`
+- PR title: `$pr_title`
+- PR body: `$pr_body`
+- File path: `$file_path`
+- File status: `$file_status` (added / modified / removed / renamed)
+- Chunk note: `$chunk_note` (either "whole file" or "hunk N of M")
 - Unified diff (the change to review): below.
 
 ## What to do
@@ -62,5 +62,5 @@ The diff uses standard unified format. Lines starting with `+` are on the new si
 ## The diff
 
 ```diff
-{diff}
+$diff
 ```

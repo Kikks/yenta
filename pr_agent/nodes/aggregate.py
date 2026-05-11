@@ -49,7 +49,9 @@ def _size_bonus(additions: int, deletions: int) -> int:
 @observe(name="node.aggregate")
 def aggregate_node(state: GraphState) -> dict[str, Any]:
     score_findings = sum(SEVERITY_WEIGHTS.get(f.severity, 0) for f in state.findings)
-    paths = {f.file_path for f in state.files}
+    # NB: state.files holds FileChange (attr `path`); state.findings holds
+    # Finding (attr `file_path`). Don't conflate.
+    paths = {f.path for f in state.files}
     score_paths = _sensitive_path_bonus(paths)
     score_size = _size_bonus(
         state.pr_meta.additions if state.pr_meta else 0,
