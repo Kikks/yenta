@@ -213,6 +213,39 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
     body = summary + _agent_signature(state)
     line_comments = _line_comments_from_findings(state)
 
+    # Build per-reviewer comment bodies so dry-run can preview them and
+    # the live path posts the same exact text.
+    reviewer_comments = [
+        {
+            "login": a.login,
+            "body": (
+                f"@{a.login} — tagged you on this PR.\n\n"
+                f"**Why you:** {a.reason}\n\n"
+                f"**Focus:**\n{a.focus}"
+            ),
+        }
+        for a in assignments
+    ]
+
+    pending = {
+        "pending_review_body": body,
+        "pending_review_event": profile.review_event_on_escalate,
+        "pending_line_comments": line_comments,
+        "pending_reviewer_comments": reviewer_comments,
+        "reviewers_assigned": assignments,
+    }
+
+    if state.dry_run:
+        log.info(
+            "DRY-RUN: skipping GitHub writes (would post %s review, %d line "
+            "comments, request %d reviewers, %d per-reviewer comments)",
+            profile.review_event_on_escalate,
+            len(line_comments),
+            len(assignments),
+            len(reviewer_comments),
+        )
+        return pending
+
     review_url: str | None = None
     try:
         review = gh.post_review(
@@ -233,7 +266,7 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
             review_url = getattr(review, "html_url", state.pr_meta.url)
         except GithubException as e2:
             log.exception("review post failed even body-only")
-            return {"errors": state.errors + [f"escalate review failed: {e2}"]}
+            return {**pending, "errors": state.errors + [f"escalate review failed: {e2}"]}
 
     # --- request reviewers on GitHub ---
     logins = [a.login for a in assignments]
@@ -241,18 +274,10 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
         gh.request_reviewers(pr, logins)
 
     # --- one targeted issue comment per reviewer ---
-    for a in assignments:
-        msg = (
-            f"@{a.login} — tagged you on this PR.\n\n"
-            f"**Why you:** {a.reason}\n\n"
-            f"**Focus:**\n{a.focus}"
-        )
+    for rc in reviewer_comments:
         try:
-            gh.post_issue_comment(pr, msg)
+            gh.post_issue_comment(pr, rc["body"])
         except GithubException as e:
-            log.warning("per-reviewer comment failed for @%s: %s", a.login, e)
+            log.warning("per-reviewer comment failed for @%s: %s", rc["login"], e)
 
-    return {
-        "review_url": review_url,
-        "reviewers_assigned": assignments,
-    }
+    return {**pending, "review_url": review_url}

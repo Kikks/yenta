@@ -22,12 +22,13 @@ That's it. The agent talks to GitHub for real — no stdout simulation.
 ### CLI
 
 ```bash
-python main.py <PR_URL> --mode {conservative|aggressive}
+python main.py <PR_URL> --mode {conservative|aggressive} [--dry-run]
 ```
 
 - `PR_URL` — full URL, e.g. `https://github.com/octocat/Hello-World/pull/42`
 - `--mode conservative` — escalates eagerly (threshold 25), `REQUEST_CHANGES` event
 - `--mode aggressive` — auto-approves more readily (threshold 60), softer `COMMENT` event
+- `--dry-run` — runs the full pipeline (fetch + LLM + decision + reviewer pick) **but does not post to GitHub**. Prints the exact payloads it would have posted. Use this the first time you point it at a new PR.
 
 ### Required env (see `.env.example`)
 

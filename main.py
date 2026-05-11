@@ -34,16 +34,16 @@ def _parse_pr_url(url: str) -> tuple[str, str, int]:
 
 
 @observe(name="pr_review_agent.run")
-def run(pr_url: str, mode: str) -> GraphState:
+def run(pr_url: str, mode: str, dry_run: bool = False) -> GraphState:
     owner, repo, number = _parse_pr_url(pr_url)
     update_trace(
         name=f"pr-review/{owner}/{repo}#{number}",
-        tags=[f"mode:{mode}", f"repo:{owner}/{repo}"],
-        metadata={"pr_url": pr_url, "mode": mode},
+        tags=[f"mode:{mode}", f"repo:{owner}/{repo}"] + (["dry-run"] if dry_run else []),
+        metadata={"pr_url": pr_url, "mode": mode, "dry_run": dry_run},
     )
 
     graph = build_graph()
-    initial = GraphState(pr_url=pr_url, mode=mode)  # type: ignore[arg-type]
+    initial = GraphState(pr_url=pr_url, mode=mode, dry_run=dry_run)  # type: ignore[arg-type]
     final = graph.invoke(initial)
     # LangGraph may return a dict or a GraphState depending on version.
     return final if isinstance(final, GraphState) else GraphState.model_validate(final)
@@ -64,6 +64,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         required=True,
         help="conservative escalates eagerly; aggressive auto-approves more readily",
     )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Run the full pipeline (fetch + LLM + decision) but skip real "
+            "GitHub writes. Prints exactly what would be posted."
+        ),
+    )
     args = p.parse_args(argv)
 
     # Validate env upfront so we fail fast before any LLM/GH calls.
@@ -74,7 +82,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
 
     try:
-        state = run(args.pr_url, args.mode)
+        state = run(args.pr_url, args.mode, dry_run=args.dry_run)
     except Exception as e:  # surface a clean error; full trace is in logs
         log.exception("agent failed")
         print(f"[agent] failed: {e}", file=sys.stderr)
@@ -82,15 +90,71 @@ def main(argv: Optional[list[str]] = None) -> int:
     finally:
         lf_flush()
 
-    print()
-    print(f"decision: {state.decision}")
-    print(f"risk_score: {state.risk_score}")
-    print(f"review_url: {state.review_url}")
-    if state.reviewers_assigned:
-        print("reviewers:")
-        for r in state.reviewers_assigned:
-            print(f"  - @{r.login} :: {r.reason}")
+    _print_report(state, dry_run=args.dry_run)
     return 0
+
+
+_BAR = "─" * 72
+
+
+def _print_report(state: GraphState, *, dry_run: bool) -> None:
+    print()
+    print(_BAR)
+    print(f"  Mode: {state.mode}{'  (DRY-RUN)' if dry_run else ''}")
+    print(f"  Decision: {state.decision}")
+    print(f"  Risk score: {state.risk_score}  {state.risk_breakdown}")
+    if state.decision_rationale:
+        print(f"  Rationale: {state.decision_rationale}")
+    print(f"  Findings: {len(state.findings)} "
+          f"(critical={sum(1 for f in state.findings if f.severity == 'critical')}, "
+          f"high={sum(1 for f in state.findings if f.severity == 'high')}, "
+          f"medium={sum(1 for f in state.findings if f.severity == 'medium')}, "
+          f"low={sum(1 for f in state.findings if f.severity == 'low')})")
+    if state.truncated:
+        print("  TRUNCATED: hit MAX_LLM_CALLS_PER_RUN")
+    print(_BAR)
+
+    if state.pending_review_body:
+        print()
+        print(f"  -> would post review with event={state.pending_review_event}")
+        print(_BAR)
+        for line in state.pending_review_body.splitlines():
+            print(f"  | {line}")
+        print(_BAR)
+
+    if state.pending_line_comments:
+        print()
+        print(f"  -> would post {len(state.pending_line_comments)} line comments:")
+        for c in state.pending_line_comments[:10]:
+            print(f"     {c['path']}:L{c['line']}")
+            for line in c["body"].splitlines():
+                print(f"        | {line}")
+        if len(state.pending_line_comments) > 10:
+            print(f"     ... ({len(state.pending_line_comments) - 10} more)")
+
+    if state.reviewers_assigned:
+        print()
+        print(f"  -> would request {len(state.reviewers_assigned)} reviewers:")
+        for r in state.reviewers_assigned:
+            print(f"     @{r.login} :: {r.reason}")
+
+    if state.pending_reviewer_comments:
+        print()
+        print(f"  -> would post {len(state.pending_reviewer_comments)} per-reviewer comments:")
+        for rc in state.pending_reviewer_comments:
+            print(f"     @ {rc['login']}")
+            for line in rc["body"].splitlines():
+                print(f"        | {line}")
+
+    if state.review_url:
+        print()
+        print(f"  review URL: {state.review_url}")
+
+    if state.errors:
+        print()
+        print("  ERRORS:")
+        for e in state.errors:
+            print(f"    - {e}")
 
 
 if __name__ == "__main__":

@@ -98,11 +98,22 @@ def approve_node(state: GraphState) -> dict[str, Any]:
         log.warning("agent token owns the PR; downgrading APPROVE -> COMMENT")
         event = "COMMENT"
 
+    pending = {
+        "pending_review_body": body,
+        "pending_review_event": event,
+        "pending_line_comments": [],
+        "pending_reviewer_comments": [],
+    }
+
+    if state.dry_run:
+        log.info("DRY-RUN: skipping GitHub write (would have posted %s review)", event)
+        return pending
+
     try:
         review = gh.post_review(pr, body=body, event=event, comments=[])
         url = getattr(review, "html_url", state.pr_meta.url)
     except GithubException as e:
         log.exception("approve review post failed")
-        return {"errors": state.errors + [f"approve failed: {e}"]}
+        return {**pending, "errors": state.errors + [f"approve failed: {e}"]}
 
-    return {"review_url": url}
+    return {**pending, "review_url": url}

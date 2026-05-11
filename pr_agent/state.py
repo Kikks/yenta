@@ -74,6 +74,10 @@ class GraphState(BaseModel):
     # --- inputs ---
     pr_url: str
     mode: Mode
+    # Dry-run: do everything EXCEPT real GitHub writes. The would-be
+    # review body, line comments, and reviewer assignments are still
+    # populated so we can print them — but nothing posts.
+    dry_run: bool = False
 
     # --- populated by fetch node ---
     pr_meta: Optional[PRMeta] = None
@@ -99,6 +103,12 @@ class GraphState(BaseModel):
     # --- populated by approve/escalate nodes ---
     reviewers_assigned: list[ReviewerAssignment] = Field(default_factory=list)
     review_url: Optional[str] = None
+    # The exact payloads we would (or did) post to GitHub. Populated in
+    # both dry-run and live runs so the CLI can print them for review.
+    pending_review_body: Optional[str] = None
+    pending_review_event: Optional[str] = None  # APPROVE / REQUEST_CHANGES / COMMENT
+    pending_line_comments: list[dict] = Field(default_factory=list)
+    pending_reviewer_comments: list[dict] = Field(default_factory=list)  # [{login, body}]
 
     # --- diagnostics ---
     errors: list[str] = Field(default_factory=list)
