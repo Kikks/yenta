@@ -111,17 +111,24 @@ class GitHubClient:
         out: dict[str, list[str]] = {}
         repo = self.repo(owner, name)
         for path in paths:
+            seen: list[str] = []
             try:
                 commits = repo.get_commits(path=path)
-                seen: list[str] = []
-                # PyGithub's PaginatedList supports slicing; cap at per_path_limit.
-                for c in commits[:per_path_limit]:
+                # Don't slice PyGithub's PaginatedList — slicing past the
+                # underlying length raises IndexError (not StopIteration)
+                # for paths with very short history (e.g. files newly
+                # added in *this* PR). Iterate directly and break early.
+                for i, c in enumerate(commits):
+                    if i >= per_path_limit:
+                        break
                     if c.author and c.author.login and c.author.login not in seen:
                         seen.append(c.author.login)
-                out[path] = seen
-            except GithubException as e:
+            except (GithubException, IndexError, StopIteration) as e:
+                # IndexError catches the PyGithub paginated-list edge case
+                # described above; GithubException catches 404s on paths
+                # that don't exist on the base ref (e.g. file moves).
                 log.warning("blame lookup failed for %s: %s", path, e)
-                out[path] = []
+            out[path] = seen
         return out
 
     # ---------- writes (used by Phase 4) ----------
