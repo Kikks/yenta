@@ -40,6 +40,15 @@ def _render_summary(state: GraphState, llm: LLM) -> str:
         }
         for f in state.findings
     ]
+    files_payload = [
+        {
+            "path": f.path,
+            "status": f.status,
+            "additions": f.additions,
+            "deletions": f.deletions,
+        }
+        for f in state.files
+    ]
     template = _SUMMARY_PROMPT.read_text(encoding="utf-8")
     user = Template(template).safe_substitute(
         owner=pr.owner if pr else "",
@@ -51,6 +60,7 @@ def _render_summary(state: GraphState, llm: LLM) -> str:
         decision=state.decision or "unknown",
         risk_score=state.risk_score,
         findings_json=json.dumps(findings_payload, indent=2),
+        files_json=json.dumps(files_payload, indent=2),
         file_count=len(state.files),
         additions=pr.additions if pr else 0,
         deletions=pr.deletions if pr else 0,
