@@ -14,10 +14,10 @@ Built for the [Numeo AI Product Engineering Challenge](https://github.com/numeo-
 |---|---|
 | Built the agent end-to-end | LangGraph DAG: fetch → chunk → Haiku triage → Sonnet analyze (bounded concurrency, cached prompt) → deterministic risk score → decide → approve/escalate. ~$0.02 per typical PR. |
 | Ran Yenta against [her own first PR](https://github.com/Kikks/yenta/pull/1) | She **hallucinated TypeScript filenames** (`cli.ts`, `postInlineComments`) on a Python codebase. Diagnosed root cause, shipped a targeted fix in <30 LOC, re-ran clean. Receipts below. |
-| Ran Yenta against the [borderline concurrency PR](https://github.com/Kikks/yenta/pull/2) | She caught a **real correctness bug in my own code**: budget cap is enforced at submit time but in-flight workers don't re-check. Auto-approved at risk 18/100 with the finding surfaced. |
+| Ran Yenta against the [borderline concurrency PR](https://github.com/Kikks/yenta/pull/2) | She surfaced a **plausible-sounding finding that turned out to be a false positive** on closer read — the subtler LLM-reviewer failure mode. Auto-approved at risk 18/100. |
 | Ran Yenta against the [hallucination fix](https://github.com/Kikks/yenta/pull/3) | Self-reviewed clean, real Python paths cited, risk 0/100. Auto-approve. |
 
-The agent isn't just shipped — it was *used* against its own changes, *failed*, was *fixed*, and *re-ran clean*. That loop is the part of the build I'd most want to talk about in interview.
+The agent isn't just shipped — it was *used* against its own changes, *failed* in two distinct ways, was *fixed*, and *re-ran clean*. The two LLM-reviewer failure modes that surfaced (a flagrant hallucination on PR #1, a plausible false positive on PR #2) are the most informative part of the build.
 
 ---
 
@@ -58,13 +58,15 @@ Two changes, ~30 LOC across three files:
 
 Real paths. Real diff sizes. No fabrication. The grounding rule did its job.
 
-### Bonus — Yenta caught a real bug in PR #2
+### Subtler — PR #2: a plausible-sounding false positive
 
-[PR #2 (bounded concurrency)](https://github.com/Kikks/yenta/pull/2) shipped `ThreadPoolExecutor` parallelism in the analyze node. Yenta reviewed it and surfaced this:
+[PR #2 (bounded concurrency)](https://github.com/Kikks/yenta/pull/2) shipped `ThreadPoolExecutor` parallelism in the analyze node. Yenta auto-approved with this finding:
 
 > **Correctness (medium):** The budget-exceeded check breaks the submission loop, but in-flight workers continue executing and consuming budget. This can lead to overspend in high-concurrency scenarios.
 
-She's right. The submit loop checks `_calls_made < cap` *before submitting* a worker, but a worker already in flight when the cap is reached will still call the LLM. With concurrency 4–8 the overshoot is bounded and small, but the finding is legitimate. Logged in *Future work* below. **The agent did exactly what it should: borderline change, real finding, auto-approve in conservative mode (risk 18/100), specific fix suggestion in the review body.**
+It reads convincing. It isn't. The check-and-increment of `_calls_made` in [`pr_agent/llm.py`](pr_agent/llm.py) is already atomic under `self._calls_lock` — every worker re-checks the cap inside the lock, right before its API call. There is no "submission loop budget check" — the submission loop submits everything, and each worker individually guards the cap. [`tests/test_analyze_concurrency.py`](tests/test_analyze_concurrency.py) already exercises exactly the scenario the finding describes (20 chunks, budget=5, concurrency=8) and asserts at most 5 real API calls fire. It passes.
+
+I almost shipped "she's right" into this README before catching it on a closer read. **This is the subtler failure mode of an LLM reviewer: a generic concurrency anti-pattern, the right severity vocabulary, all the surface markers of a real finding — and wrong.** Harder to catch than PR #1's invented filenames, and exactly the failure mode an offline eval harness catches but an inline human-eyes loop misses. The eval-harness item under *Future work* moves from nice-to-have to load-bearing.
 
 ---
 
@@ -148,7 +150,7 @@ flowchart TD
 
 ### Why LLM perceives, code decides
 
-The model is the perception layer. The decision layer is deterministic Python. Same findings → same decision, every run. The interview panel can point at one number per mode (the threshold) and ask "why?" — and there's an answer that doesn't depend on temperature.
+The model is the perception layer. The decision layer is deterministic Python. Same findings → same decision, every run. Anyone reading the code can point at one number per mode (the threshold) and ask "why?" — and there's an answer that doesn't depend on temperature.
 
 A free-form ReAct loop would have been cute but worse on testability and observability. A `StateGraph` is exactly the right level of abstraction for a fixed DAG with one branch point.
 
@@ -244,13 +246,12 @@ If `LANGFUSE_*` env is absent, the decorators are no-ops — the agent still run
 The job post asks *"what breaks first at 1000x scale?"* — so:
 
 1. **Cost.** Addressed via prompt caching + Haiku triage (see above). [PR #2](https://github.com/Kikks/yenta/pull/2) added bounded concurrency in analyze (4–8x throughput at no extra cost).
-2. **In-flight budget overshoot** — *found by Yenta on PR #2*. The submit loop checks the cap, but workers already in flight when the cap is hit will still call the LLM. **Fix:** workers re-check the budget cap inside the lock just before the LLM call and abort if exceeded.
+2. **Plausible-sounding false positives** — the failure mode Yenta surfaced on PR #2 (above). At 1000x scale, manually verifying every finding against the source isn't feasible. The spec calls out "eval frameworks for non-deterministic systems"; this is why. **Fix:** a golden-set eval — (diff → expected finding categories) pairs — running as CI on every prompt change. Langfuse Datasets fits the shape.
 3. **GitHub secondary rate limits.** PyGithub doesn't surface them well. **Fix:** backoff on 403, dedupe comments by `(file, line, hash)` on re-runs (idempotent reviews).
-4. **Prompt drift without evals.** The spec explicitly lists "eval frameworks for non-deterministic systems." **Fix:** golden-set of (PR diff → expected finding categories) pairs; CI on every prompt change. Langfuse Datasets fits naturally.
-5. **Reviewer signal decay.** CODEOWNERS goes stale; `git blame` returns people who left. **Fix:** decay-weight blame toward last-90-days; cross-check assignees against active org membership.
-6. **No memory across PRs in a series.** Stacked PRs reviewed in isolation. **Fix:** vector store of recent reviews keyed by (author, repo) so we can flag "you keep introducing X."
-7. **Provider single-point-of-failure.** Claude-only today. **Fix:** thin provider abstraction with Claude primary, OpenAI fallback on 5xx — explicitly deferred for the 6-hour cap.
-8. **Cache TTL.** Anthropic's ephemeral cache is 5 minutes. **Fix at higher volume:** the longer-term 1-hour beta cache, if Anthropic exposes it stably.
+4. **Reviewer signal decay.** CODEOWNERS goes stale; `git blame` returns people who left. **Fix:** decay-weight blame toward last-90-days; cross-check assignees against active org membership.
+5. **No memory across PRs in a series.** Stacked PRs reviewed in isolation. **Fix:** vector store of recent reviews keyed by (author, repo) so we can flag "you keep introducing X."
+6. **Provider single-point-of-failure.** Claude-only today. **Fix:** thin provider abstraction with Claude primary, OpenAI fallback on 5xx — explicitly deferred for the 6-hour cap.
+7. **Cache TTL.** Anthropic's ephemeral cache is 5 minutes. **Fix at higher volume:** the longer-term 1-hour beta cache, if Anthropic exposes it stably.
 
 ---
 
@@ -303,10 +304,9 @@ pytest -q
 
 ## Future work (deliberately deferred)
 
-- **In-flight budget overshoot** — surfaced by Yenta on PR #2; fix outlined in *What breaks at 1000x*.
+- **Eval harness — golden-set regression tests (Langfuse Datasets).** Promoted out of the "nice to have" pile by the PR #2 false positive (above). Without this, prompt regressions ship silently.
 - Provider fallback (Claude → OpenAI) via thin abstraction
 - Comment dedupe across re-runs (idempotent reviews)
-- Eval harness — golden-set regression tests (Langfuse Datasets)
 - Team mentions in CODEOWNERS (separate GitHub API param)
 - `SELF_IDENTITIES` env var to merge multiple operator identities
 - Webhook entrypoint — currently one-shot CLI per spec
@@ -318,4 +318,4 @@ pytest -q
 
 Built with Claude Code in plan-then-execute mode. The discipline that paid off was **planning before code** — architecting + resolving spec ambiguity (mode semantics, risk definition, reviewer selection) up front, before touching the editor. Each phase commit then executed against a clear design intent rather than the model improvising.
 
-The dogfooding loop in this README is the second-order win from that discipline: the architecture was clean enough that I could meaningfully *use* the agent against itself, find a real bug, and ship a targeted fix in <30 LOC. That's much harder when the codebase has been improvised.
+The dogfooding loop in this README is the second-order win from that discipline: the architecture was clean enough that I could meaningfully *use* the agent against itself, catch a real hallucination on PR #1 and ship a targeted fix in <30 LOC, and *also* catch a plausible-sounding false positive on PR #2 — the kind that offline evals surface and inline review tends to miss.
