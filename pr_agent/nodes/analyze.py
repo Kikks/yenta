@@ -73,6 +73,19 @@ def analyze_node(state: GraphState) -> dict[str, Any]:
     errors: list[str] = []
 
     for chunk in state.chunks:
+        # Triage said skip — log it and move on. The skip is already
+        # captured in state.triage_skipped (set by triage_node) so the
+        # final review body can honestly disclose what wasn't analyzed.
+        # Keeping these OUT of state.findings means they don't inflate
+        # the risk score (important on monorepo PRs where 50 lockfile
+        # bumps would otherwise force escalation).
+        if chunk.triage_decision == "skip":
+            log.info(
+                "analyze: skipping %s by triage (%s)",
+                chunk.file_path, chunk.triage_reason or "no reason given",
+            )
+            continue
+
         user_prompt = _format_user_prompt(
             user_template, state, chunk, per_file[chunk.file_path]
         )

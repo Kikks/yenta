@@ -110,6 +110,12 @@ def _print_report(state: GraphState, *, dry_run: bool) -> None:
           f"high={sum(1 for f in state.findings if f.severity == 'high')}, "
           f"medium={sum(1 for f in state.findings if f.severity == 'medium')}, "
           f"low={sum(1 for f in state.findings if f.severity == 'low')})")
+    if state.triage_skipped:
+        print(f"  Triage-skipped: {len(state.triage_skipped)} chunk(s) (cheap pass declined deep review)")
+        for sk in state.triage_skipped[:5]:
+            print(f"     - {sk['file_path']} :: {sk['reason']}")
+        if len(state.triage_skipped) > 5:
+            print(f"     ... ({len(state.triage_skipped) - 5} more)")
     if state.truncated:
         print("  TRUNCATED: hit MAX_LLM_CALLS_PER_RUN")
     print(_BAR)

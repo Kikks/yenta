@@ -82,6 +82,8 @@ class RuntimeConfig:
     github_token: str
     anthropic_api_key: str
     anthropic_model: str
+    anthropic_triage_model: str
+    triage_enabled: bool
     langfuse_public_key: str | None
     langfuse_secret_key: str | None
     langfuse_host: str | None
@@ -101,6 +103,10 @@ class RuntimeConfig:
             github_token=gh,
             anthropic_api_key=anth,
             anthropic_model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
+            anthropic_triage_model=os.environ.get(
+                "ANTHROPIC_TRIAGE_MODEL", "claude-haiku-4-5"
+            ),
+            triage_enabled=os.environ.get("TRIAGE_ENABLED", "1") not in ("0", "false", "False"),
             langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"),
             langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY"),
             langfuse_host=os.environ.get("LANGFUSE_HOST"),

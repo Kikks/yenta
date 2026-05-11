@@ -51,6 +51,10 @@ class DiffChunk(BaseModel):
     hunk_index: Optional[int] = None
     content: str  # the unified-diff text we'll send to the LLM
     approx_tokens: int
+    # Set by the triage node. Default "review" so chunks created before
+    # triage (e.g. in tests) still get analyzed.
+    triage_decision: Literal["review", "skip"] = "review"
+    triage_reason: Optional[str] = None
 
 
 class Finding(BaseModel):
@@ -88,6 +92,12 @@ class GraphState(BaseModel):
     # --- populated by chunk node ---
     chunks: list[DiffChunk] = Field(default_factory=list)
     truncated: bool = False  # we hit the safety cap on LLM calls
+
+    # --- populated by triage node ---
+    # List of (file_path, reason) tuples for chunks the triage Haiku decided
+    # weren't worth a deep Sonnet pass. Tracked separately from findings so
+    # they don't inflate the risk score on monorepo PRs.
+    triage_skipped: list[dict] = Field(default_factory=list)
 
     # --- populated by analyze node ---
     findings: list[Finding] = Field(default_factory=list)

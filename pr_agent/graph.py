@@ -21,6 +21,7 @@ from .nodes.chunk import chunk_node
 from .nodes.decide import decide_node
 from .nodes.escalate import escalate_node
 from .nodes.fetch import fetch_node
+from .nodes.triage import triage_node
 from .state import GraphState
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ def build_graph():
 
     g.add_node("fetch", fetch_node)
     g.add_node("chunk", chunk_node)
+    g.add_node("triage", triage_node)
     g.add_node("analyze", analyze_node)
     g.add_node("aggregate", aggregate_node)
     g.add_node("decide", decide_node)
@@ -45,7 +47,8 @@ def build_graph():
 
     g.add_edge(START, "fetch")
     g.add_edge("fetch", "chunk")
-    g.add_edge("chunk", "analyze")
+    g.add_edge("chunk", "triage")
+    g.add_edge("triage", "analyze")
     g.add_edge("analyze", "aggregate")
     g.add_edge("aggregate", "decide")
     g.add_conditional_edges("decide", _route, {"approve": "approve", "escalate": "escalate"})

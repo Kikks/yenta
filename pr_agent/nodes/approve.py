@@ -52,6 +52,7 @@ def _render_summary(state: GraphState, llm: LLM) -> str:
         additions=pr.additions if pr else 0,
         deletions=pr.deletions if pr else 0,
         truncated=str(state.truncated).lower(),
+        triage_skipped_count=len(state.triage_skipped),
         is_fork=str(pr.is_fork if pr else False).lower(),
     )
     return llm.complete(

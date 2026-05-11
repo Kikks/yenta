@@ -54,6 +54,7 @@ class LLM:
         max_tokens: int = 2000,
         temperature: float = 0.2,
         cache_system: bool = False,
+        model_override: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> str:
         """Single Anthropic call.
@@ -84,9 +85,10 @@ class LLM:
         else:
             system_param = system
 
+        model_used = model_override or self._model
         start = time.perf_counter()
         resp = self._client.messages.create(
-            model=self._model,
+            model=model_used,
             max_tokens=max_tokens,
             temperature=temperature,
             system=system_param,
@@ -120,7 +122,7 @@ class LLM:
         update_generation(
             input={"system": system, "user": user},
             output=text,
-            model=self._model,
+            model=model_used,
             usage=usage,
             model_parameters={"temperature": temperature, "max_tokens": max_tokens},
             metadata={
@@ -133,7 +135,7 @@ class LLM:
         log.info(
             "llm call #%d model=%s in=%d out=%d cache_create=%d cache_read=%d latency_ms=%d",
             self._calls_made,
-            self._model,
+            model_used,
             usage["input"],
             usage["output"],
             cache_creation,

@@ -16,6 +16,7 @@ $findings_json
 
 - Files: $file_count changed, +$additions/-$deletions
 - Truncated: $truncated (true = we hit our analysis budget and didn't read every chunk)
+- Triage-skipped: $triage_skipped_count file(s) were skipped by the cheap triage step because they looked uninteresting (lockfile updates, formatting-only changes, generated files, etc.). If non-zero, briefly disclose this.
 - Fork: $is_fork
 
 ## What to write
