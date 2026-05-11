@@ -16,17 +16,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-try:
-    from langfuse.decorators import observe
-except Exception:  # pragma: no cover
-    def observe(*_a, **_k):
-        def deco(fn):
-            return fn
-
-        return deco
-
 from ..config import RuntimeConfig
 from ..llm import LLM, LLMBudgetExceeded, parse_json_block
+from ..obs import observe
 from ..state import DiffChunk, Finding, GraphState
 
 log = logging.getLogger(__name__)

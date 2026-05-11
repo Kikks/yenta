@@ -9,9 +9,11 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
-from dotenv import load_dotenv
-
-load_dotenv()
+# Note: we deliberately do NOT call load_dotenv() at import time. The
+# CLI entrypoint (main.py) is the *only* place that loads .env, with
+# override=True so values in .env beat shell-exported blanks (e.g.
+# `ANTHROPIC_API_KEY=''`). Keeping config import side-effect-free means
+# tests can set os.environ directly without .env stomping on them.
 
 Mode = Literal["conservative", "aggressive"]
 

@@ -13,29 +13,10 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-try:
-    from langfuse.decorators import langfuse_context, observe
-    _LANGFUSE_OK = True
-except Exception:  # pragma: no cover
-    _LANGFUSE_OK = False
-
-    def observe(*_a, **_k):  # type: ignore[no-redef]
-        def deco(fn):
-            return fn
-
-        return deco
-
-    class _NullCtx:  # type: ignore[no-redef]
-        def update_current_trace(self, **_kwargs):
-            return
-
-        def flush(self) -> None:
-            return
-
-    langfuse_context = _NullCtx()  # type: ignore[assignment]
-
 from pr_agent.config import RuntimeConfig
 from pr_agent.graph import build_graph
+from pr_agent.obs import flush as lf_flush
+from pr_agent.obs import observe, update_trace
 from pr_agent.state import GraphState
 
 log = logging.getLogger("pr_agent")
@@ -55,7 +36,7 @@ def _parse_pr_url(url: str) -> tuple[str, str, int]:
 @observe(name="pr_review_agent.run")
 def run(pr_url: str, mode: str) -> GraphState:
     owner, repo, number = _parse_pr_url(pr_url)
-    langfuse_context.update_current_trace(
+    update_trace(
         name=f"pr-review/{owner}/{repo}#{number}",
         tags=[f"mode:{mode}", f"repo:{owner}/{repo}"],
         metadata={"pr_url": pr_url, "mode": mode},
@@ -69,7 +50,7 @@ def run(pr_url: str, mode: str) -> GraphState:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    load_dotenv()
+    load_dotenv(override=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
@@ -99,11 +80,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"[agent] failed: {e}", file=sys.stderr)
         return 1
     finally:
-        if _LANGFUSE_OK:
-            try:
-                langfuse_context.flush()
-            except Exception:
-                pass
+        lf_flush()
 
     print()
     print(f"decision: {state.decision}")

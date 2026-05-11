@@ -3,10 +3,10 @@
 The spec is explicit: "For every LLM call, we must be able to see: the
 prompt sent, the model used, the output received, token usage, latency."
 
-We use Langfuse's `@observe(as_type="generation")` decorator. Inside the
-decorated function we call `langfuse_context.update_current_observation`
-to attach input/output/usage/model — which is exactly what's listed in
-the spec, plus latency (auto-captured) and cost (Langfuse derives it).
+`@observe(as_type="generation")` (via pr_agent.obs) creates a Langfuse
+generation span; inside it we call `update_generation(...)` to attach
+prompt, model, output, usage and latency. The wrapper degrades to a
+no-op when Langfuse env isn't configured — the agent still runs.
 """
 from __future__ import annotations
 
@@ -17,28 +17,8 @@ from typing import Any
 
 from anthropic import Anthropic
 
-try:
-    from langfuse.decorators import langfuse_context, observe
-    _LANGFUSE_OK = True
-except Exception:  # pragma: no cover - import-time fallback
-    _LANGFUSE_OK = False
-
-    def observe(*_args, **_kwargs):  # type: ignore[no-redef]
-        def deco(fn):
-            return fn
-
-        return deco
-
-    class _NullCtx:  # type: ignore[no-redef]
-        def update_current_observation(self, **_kwargs: Any) -> None:
-            return
-
-        def update_current_trace(self, **_kwargs: Any) -> None:
-            return
-
-    langfuse_context = _NullCtx()  # type: ignore[assignment]
-
 from .config import RuntimeConfig
+from .obs import observe, update_generation
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +45,7 @@ class LLM:
     def calls_made(self) -> int:
         return self._calls_made
 
-    @observe(as_type="generation", name="anthropic.messages.create")
+    @observe(name="anthropic.messages.create", as_type="generation")
     def complete(
         self,
         *,
@@ -102,17 +82,13 @@ class LLM:
 
         # Push everything the spec asks for into Langfuse so a reviewer can
         # see *exactly* what the model saw and what it returned.
-        langfuse_context.update_current_observation(
+        update_generation(
             input={"system": system, "user": user},
             output=text,
             model=self._model,
             usage=usage,
-            metadata={
-                **(metadata or {}),
-                "latency_ms": latency_ms,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
+            model_parameters={"temperature": temperature, "max_tokens": max_tokens},
+            metadata={**(metadata or {}), "latency_ms": latency_ms},
         )
 
         log.info(

@@ -15,22 +15,8 @@ import logging
 import re
 from typing import Any
 
-try:
-    from langfuse.decorators import langfuse_context, observe
-except Exception:  # pragma: no cover
-    def observe(*_a, **_k):
-        def deco(fn):
-            return fn
-
-        return deco
-
-    class _Null:
-        def update_current_observation(self, **_k):
-            return
-
-    langfuse_context = _Null()  # type: ignore[assignment]
-
 from ..config import SENSITIVE_PATH_PATTERNS, SEVERITY_WEIGHTS
+from ..obs import observe, update_span
 from ..state import GraphState
 
 log = logging.getLogger(__name__)
@@ -81,7 +67,7 @@ def aggregate_node(state: GraphState) -> dict[str, Any]:
         "analysis_truncated": score_truncated,
     }
 
-    langfuse_context.update_current_observation(
+    update_span(
         input={"finding_count": len(state.findings), "files": len(state.files)},
         output={"risk_score": total, "breakdown": breakdown},
     )

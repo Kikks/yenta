@@ -21,20 +21,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-try:
-    from langfuse.decorators import observe
-except Exception:  # pragma: no cover
-    def observe(*_a, **_k):
-        def deco(fn):
-            return fn
-
-        return deco
-
 from github.GithubException import GithubException
 
 from ..config import MODE_PROFILES, RuntimeConfig
 from ..github_client import GitHubClient, collapse_committers
 from ..llm import LLM
+from ..obs import observe
 from ..reviewers import owners_for_path, parse_codeowners, split_user_and_team
 from ..state import Finding, GraphState, ReviewerAssignment
 

@@ -10,20 +10,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
-try:
-    from langfuse.decorators import observe
-except Exception:  # pragma: no cover
-    def observe(*_a, **_k):
-        def deco(fn):
-            return fn
-
-        return deco
-
 from github.GithubException import GithubException
 
 from ..config import MODE_PROFILES, RuntimeConfig
 from ..github_client import GitHubClient
 from ..llm import LLM
+from ..obs import observe
 from ..state import GraphState
 
 log = logging.getLogger(__name__)

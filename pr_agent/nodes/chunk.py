@@ -19,19 +19,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-try:
-    from langfuse.decorators import observe
-except Exception:  # pragma: no cover
-    def observe(*_a, **_k):
-        def deco(fn):
-            return fn
-
-        return deco
-
 from unidiff import PatchSet
 
 from ..config import RuntimeConfig
 from ..llm import approx_token_count
+from ..obs import observe
 from ..state import DiffChunk, GraphState
 
 log = logging.getLogger(__name__)
