@@ -45,13 +45,14 @@ When the dry-run output looks right, drop `--dry-run` and run for real.
 ### CLI
 
 ```bash
-python main.py <PR_URL> --mode {conservative|aggressive} [--dry-run]
+python main.py <PR_URL> --mode {conservative|aggressive} [--dry-run] [--max-findings N]
 ```
 
 - `PR_URL` — full URL, e.g. `https://github.com/octocat/Hello-World/pull/42`
-- `--mode conservative` — escalates eagerly (threshold 25), `REQUEST_CHANGES` event on escalate
-- `--mode aggressive` — auto-approves more readily (threshold 60), softer `COMMENT` event
+- `--mode conservative` — escalates eagerly (threshold 50), `REQUEST_CHANGES` event on escalate
+- `--mode aggressive` — auto-approves more readily (threshold 80), softer `COMMENT` event
 - `--dry-run` — runs the full pipeline (Haiku triage + Sonnet analyze + risk score + decision + reviewer selection + summary) **without posting to GitHub**. Always do this first on a new PR.
+- `--max-findings N` (default `5`) — cap on inline line comments on escalate. Findings beyond the cap fold into a collapsed `<details>` block in the review body. Tune up for verbose audits, down for tight demos.
 
 ### Required env (see `.env.example`)
 
