@@ -214,19 +214,32 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
     body = summary + _agent_signature(state)
     line_comments = _line_comments_from_findings(state)
 
-    # Build per-reviewer comment bodies so dry-run can preview them and
-    # the live path posts the same exact text.
-    reviewer_comments = [
-        {
-            "login": a.login,
-            "body": (
-                f"@{a.login} — tagged you on this PR.\n\n"
-                f"**Why you:** {a.reason}\n\n"
-                f"**Focus:**\n{a.focus}"
-            ),
-        }
-        for a in assignments
-    ]
+    # ONE combined issue comment that addresses each reviewer in their
+    # own section. The spec says "leave each one a comment explaining
+    # what to look at" — we read that as "address each one in a comment"
+    # rather than N separate top-level comments (which flood the PR).
+    # Each reviewer still gets their own section citing specific files,
+    # lines, and findings drawn from the paths they own/touched.
+    combined_body: str | None = None
+    if assignments:
+        sections = []
+        for a in assignments:
+            sections.append(
+                f"### @{a.login}\n"
+                f"_{a.reason}_\n\n"
+                f"{a.focus}"
+            )
+        combined_body = (
+            "## Reviewer assignments\n\n"
+            "Tagging each reviewer with the specific files / findings to focus on:\n\n"
+            + "\n\n---\n\n".join(sections)
+        )
+    # Backwards-compat: the state schema still exposes `pending_reviewer_comments`
+    # as a list. We surface a one-entry list with `login='all'` so the
+    # dry-run printer keeps working without a separate code path.
+    reviewer_comments = (
+        [{"login": "all", "body": combined_body}] if combined_body else []
+    )
 
     # GitHub returns 422 if you try to APPROVE or REQUEST_CHANGES on your
     # own PR. Detect that up front and degrade to COMMENT, which still
@@ -282,11 +295,11 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
     if logins:
         gh.request_reviewers(pr, logins)
 
-    # --- one targeted issue comment per reviewer ---
-    for rc in reviewer_comments:
+    # --- single combined per-reviewer issue comment ---
+    if combined_body:
         try:
-            gh.post_issue_comment(pr, rc["body"])
+            gh.post_issue_comment(pr, combined_body)
         except GithubException as e:
-            log.warning("per-reviewer comment failed for @%s: %s", rc["login"], e)
+            log.warning("combined reviewer comment failed: %s", e)
 
     return {**pending, "review_url": review_url}
