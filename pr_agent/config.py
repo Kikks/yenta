@@ -1,0 +1,107 @@
+"""Centralised configuration.
+
+All knobs in one place so reviewers (and the interview panel) can scan how
+each mode behaves without grep-ing the codebase.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Literal
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+Mode = Literal["conservative", "aggressive"]
+
+
+@dataclass(frozen=True)
+class ModeProfile:
+    """Concrete behaviour for a mode.
+
+    `escalate_threshold` is compared against the deterministic risk score
+    computed in `nodes/aggregate.py` (range 0-100).
+    `review_event` is the GitHub review event used when escalating —
+    conservative is louder (REQUEST_CHANGES); aggressive is softer (COMMENT).
+    """
+
+    escalate_threshold: int
+    review_event_on_escalate: Literal["REQUEST_CHANGES", "COMMENT"]
+    review_event_on_approve: Literal["APPROVE"]
+    # How much of the LLM's commentary to surface back. Conservative writes
+    # everything down; aggressive only surfaces medium+ severity findings.
+    min_severity_to_comment: Literal["low", "medium", "high", "critical"]
+
+
+MODE_PROFILES: dict[Mode, ModeProfile] = {
+    "conservative": ModeProfile(
+        escalate_threshold=25,
+        review_event_on_escalate="REQUEST_CHANGES",
+        review_event_on_approve="APPROVE",
+        min_severity_to_comment="low",
+    ),
+    "aggressive": ModeProfile(
+        escalate_threshold=60,
+        review_event_on_escalate="COMMENT",
+        review_event_on_approve="APPROVE",
+        min_severity_to_comment="medium",
+    ),
+}
+
+
+# Paths the risk scorer treats as inherently sensitive. Hits here add a
+# bonus to the deterministic risk score regardless of LLM findings.
+SENSITIVE_PATH_PATTERNS = [
+    r"(^|/)\.env",
+    r"(^|/)secrets?(/|\.)",
+    r"(^|/)auth(/|\.)",
+    r"(^|/)crypto(/|\.)",
+    r"(^|/)migrations?/",
+    r"(^|/)Dockerfile$",
+    r"(^|/)\.github/workflows/",
+    r"(^|/)package\.json$",
+    r"(^|/)requirements\.txt$",
+    r"(^|/)pyproject\.toml$",
+]
+
+
+# Severity weights used by aggregate.py to compute the risk score.
+SEVERITY_WEIGHTS = {
+    "low": 2,
+    "medium": 8,
+    "high": 18,
+    "critical": 40,
+}
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    github_token: str
+    anthropic_api_key: str
+    anthropic_model: str
+    langfuse_public_key: str | None
+    langfuse_secret_key: str | None
+    langfuse_host: str | None
+    max_tokens_per_file_chunk: int
+    max_llm_calls_per_run: int
+
+    @classmethod
+    def from_env(cls) -> "RuntimeConfig":
+        gh = os.environ.get("GITHUB_TOKEN")
+        anth = os.environ.get("ANTHROPIC_API_KEY")
+        if not gh:
+            raise RuntimeError("GITHUB_TOKEN is required (see .env.example)")
+        if not anth:
+            raise RuntimeError("ANTHROPIC_API_KEY is required (see .env.example)")
+
+        return cls(
+            github_token=gh,
+            anthropic_api_key=anth,
+            anthropic_model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
+            langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"),
+            langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY"),
+            langfuse_host=os.environ.get("LANGFUSE_HOST"),
+            max_tokens_per_file_chunk=int(os.environ.get("MAX_TOKENS_PER_FILE_CHUNK", "6000")),
+            max_llm_calls_per_run=int(os.environ.get("MAX_LLM_CALLS_PER_RUN", "80")),
+        )
