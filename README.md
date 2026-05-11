@@ -4,7 +4,9 @@
 
 A LangGraph PR review agent that triages every changed file with Claude Haiku, deep-reviews the non-trivial ones with Claude Sonnet, and either **auto-approves** or **escalates** to specific human reviewers with file/line-cited comments.
 
-The name is on-the-nose: Yenta's main job is **matching PRs to the right humans**. She reads the diff, forms an opinion, and (in conservative mode) tells you exactly who should look at what — citing CODEOWNERS, falling back to `git blame`, drawing focus areas from the actual findings. In aggressive mode she's faster to wave you through.
+Yenta reads a PR end-to-end, forms opinions about it, and then decides what to do — **auto-approve quietly when the change is low-risk, or escalate with line-cited comments when it isn't**. She's a self-sufficient reviewer first; the human reviewers only come in when she escalates.
+
+The name is a wink. A *Yenta* is a Yiddish matchmaker who also happens to have strong opinions about everything she sees — and both halves of that joke apply here. On the escalate branch she matches the diff to the right humans (CODEOWNERS first, `git blame` as a fallback) and tells each one *specifically what to focus on*, drawn from her actual findings on the files they own.
 
 Built for the [Numeo AI Product Engineering Challenge](https://github.com/numeo-ai/numeo-ai-product-engineering-challenge) inside the 6-hour cap.
 
