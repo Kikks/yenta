@@ -156,64 +156,6 @@ A free-form ReAct loop would have been cute but worse on testability and observa
 
 ---
 
-## Cost analysis (the 1000x scale answer)
-
-Real numbers from the demo PR (3 files, +29 LOC):
-
-| Configuration | Per-run cost |
-|---|---|
-| v1 (no caching, no triage) | $0.035 |
-| v2 (Sonnet analyze caching) | $0.022 |
-| v3 (caching + Haiku triage) | $0.023 |
-
-For a 3-file PR, triage adds slight cost (no chunks skipped — all real React code) but buys insurance against monorepo PRs.
-
-### Scaling to Numeo
-
-| PR shape | v1 cost | v3 cost |
-|---|---|---|
-| Typical PR (~20 files mixed) | ~$0.20 | ~$0.10 |
-| Monorepo PR (~80 files w/ lockfiles, generated stubs) | ~$0.80 | ~$0.25 |
-| 100 PRs/day | $20–80/day | $10–25/day |
-| 1000 PRs/day | $200–800/day | $100–250/day |
-
-### How the cache wins
-
-```
-call #1:  cache_create=1660, in=661                       ← write phase (1.25x normal)
-call #2:  cache_create=0,    in=658, cache_read=1660      ← HIT (0.1x normal)
-call #3:  cache_create=0,    in=253, cache_read=1660      ← HIT
-```
-
-Real Langfuse output. The 1660 cached tokens are the analyze system prompt (rules + schema + examples).
-
----
-
-## Design decisions (where the spec is deliberately ambiguous)
-
-| Question | Decision | Why |
-|---|---|---|
-| What defines "risk"? | Severity-weighted findings + sensitive-path bonus (`auth/`, `migrations/`, `.env`, workflows) + size curve + fork bonus + truncation bonus. | Auditable. LLM perceives; code decides. |
-| Mode difference, *concretely*? | Two knobs: **escalate threshold** (conservative 25, aggressive 60) and **review event** (REQUEST_CHANGES vs COMMENT). Aggressive also drops `low`-severity findings from comments. | Two-knob design keeps modes meaningfully different without sprawl. |
-| How are reviewers picked? | CODEOWNERS last-match-wins per file → blame fallback (recency-weighted vote) → drop PR author and agent-token-owner → cap 3. | Mirrors what real teams do. Degrades gracefully. |
-| Huge PRs (5K/5K)? | Per-file fan-out → hunk-split via `unidiff` when one file overruns the chunk budget → hard cap on total LLM calls → `state.truncated=True` if hit, surfaced honestly in the review. | Structurally scales; never silently drops. |
-| Hard escalations? | Any `critical` finding OR fork PR with any finding → escalate regardless of score. | Safety floor that overrides mode tuning. |
-
-<details>
-<summary>More design decisions</summary>
-
-| Question | Decision | Why |
-|---|---|---|
-| Line vs PR-level comments? | Both. Findings with a line become inline comments; the summary is the review body. Reviewer assignments via `request_reviewers`; one combined issue comment (NOT N) addresses each assignee with their files/lines. | What a thoughtful human does, without flooding the PR. |
-| Fork PRs? | Fork bonus (+10) plus a safety floor: any fork PR with findings escalates regardless of mode. | Untrusted contributor. Defense in depth. |
-| Self-PR? | Detected via `viewer.login == pr_author`. APPROVE / REQUEST_CHANGES are rejected by GitHub on your own PR (422). The agent downgrades both to COMMENT. Line comments and reviewer assignment still post. | Real-world failure mode the agent handles instead of crashing. |
-| Re-runs? | Each run posts a new review. No dedupe in v1. | Documented limitation. Dedupe in *Future work*. |
-| Triage false skip? | Triage prompt explicitly says "when in doubt, choose review". On Haiku timeout / JSON parse fail → default to review. | Cost of a false skip is much higher than a false review. |
-
-</details>
-
----
-
 ## Observability — Langfuse
 
 Every LLM call captures: full prompt (system + user), output, model, usage breakdown (input / output / cache_create / cache_read / total), latency, and metadata (`node`, `file_path`, `pr_url`, `mode`).
@@ -238,20 +180,6 @@ pr-review/<owner>/<repo>#<n>          ← root, tagged {mode, repo, dry-run?}
 ```
 
 If `LANGFUSE_*` env is absent, the decorators are no-ops — the agent still runs.
-
----
-
-## What breaks at 1000x scale (and how I'd fix it)
-
-The job post asks *"what breaks first at 1000x scale?"* — so:
-
-1. **Cost.** Addressed via prompt caching + Haiku triage (see above). [PR #2](https://github.com/Kikks/yenta/pull/2) added bounded concurrency in analyze (4–8x throughput at no extra cost).
-2. **Plausible-sounding false positives** — the failure mode Yenta surfaced on PR #2 (above). At 1000x scale, manually verifying every finding against the source isn't feasible. The spec calls out "eval frameworks for non-deterministic systems"; this is why. **Fix:** a golden-set eval — (diff → expected finding categories) pairs — running as CI on every prompt change. Langfuse Datasets fits the shape.
-3. **GitHub secondary rate limits.** PyGithub doesn't surface them well. **Fix:** backoff on 403, dedupe comments by `(file, line, hash)` on re-runs (idempotent reviews).
-4. **Reviewer signal decay.** CODEOWNERS goes stale; `git blame` returns people who left. **Fix:** decay-weight blame toward last-90-days; cross-check assignees against active org membership.
-5. **No memory across PRs in a series.** Stacked PRs reviewed in isolation. **Fix:** vector store of recent reviews keyed by (author, repo) so we can flag "you keep introducing X."
-6. **Provider single-point-of-failure.** Claude-only today. **Fix:** thin provider abstraction with Claude primary, OpenAI fallback on 5xx — explicitly deferred for the 6-hour cap.
-7. **Cache TTL.** Anthropic's ephemeral cache is 5 minutes. **Fix at higher volume:** the longer-term 1-hour beta cache, if Anthropic exposes it stably.
 
 ---
 
@@ -311,11 +239,3 @@ pytest -q
 - `SELF_IDENTITIES` env var to merge multiple operator identities
 - Webhook entrypoint — currently one-shot CLI per spec
 - Triage system prompt caching (currently below Haiku's higher cache minimum)
-
----
-
-## On the AI tooling
-
-Built with Claude Code in plan-then-execute mode. The discipline that paid off was **planning before code** — architecting + resolving spec ambiguity (mode semantics, risk definition, reviewer selection) up front, before touching the editor. Each phase commit then executed against a clear design intent rather than the model improvising.
-
-The dogfooding loop in this README is the second-order win from that discipline: the architecture was clean enough that I could meaningfully *use* the agent against itself, catch a real hallucination on PR #1 and ship a targeted fix in <30 LOC, and *also* catch a plausible-sounding false positive on PR #2 — the kind that offline evals surface and inline review tends to miss.
