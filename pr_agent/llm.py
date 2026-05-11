@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import Any
 
@@ -40,9 +41,16 @@ class LLM:
         self._model = cfg.anthropic_model
         self._max_calls = cfg.max_llm_calls_per_run
         self._calls_made = 0
+        # Protects the check-and-increment of _calls_made. Without this,
+        # N concurrent workers can each read calls_made=N-1, all pass the
+        # budget check, and overshoot the cap by N-1. Lock scope is the
+        # counter only — the Anthropic HTTP call is thread-safe on its own
+        # and happens OUTSIDE the lock so we don't serialise I/O.
+        self._calls_lock = threading.Lock()
 
     @property
     def calls_made(self) -> int:
+        # Reading an int is atomic in CPython; no lock needed here.
         return self._calls_made
 
     @observe(name="anthropic.messages.create", as_type="generation")
@@ -65,11 +73,17 @@ class LLM:
         no-op. Across per-file fan-out, the cached system prompt drops
         input cost on the cached portion to 0.1x.
         """
-        if self._calls_made >= self._max_calls:
-            raise LLMBudgetExceeded(
-                f"hit MAX_LLM_CALLS_PER_RUN={self._max_calls}; aborting to prevent runaway cost"
-            )
-        self._calls_made += 1
+        # Atomic check-and-increment of the budget counter. Must be
+        # under the lock so concurrent workers can't all pass the check
+        # before any of them increment. Snapshot the call number for
+        # logging so the value is stable through this call.
+        with self._calls_lock:
+            if self._calls_made >= self._max_calls:
+                raise LLMBudgetExceeded(
+                    f"hit MAX_LLM_CALLS_PER_RUN={self._max_calls}; aborting to prevent runaway cost"
+                )
+            self._calls_made += 1
+            call_no = self._calls_made
 
         # Build the system param. When caching is on, the Anthropic API
         # expects a list of content blocks where the cache marker lives
@@ -134,7 +148,7 @@ class LLM:
 
         log.info(
             "llm call #%d model=%s in=%d out=%d cache_create=%d cache_read=%d latency_ms=%d",
-            self._calls_made,
+            call_no,
             model_used,
             usage["input"],
             usage["output"],

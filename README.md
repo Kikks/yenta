@@ -66,6 +66,7 @@ python main.py <PR_URL> --mode {conservative|aggressive} [--dry-run] [--max-find
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | Optional but recommended. Without these, traces are no-op. |
 | `MAX_TOKENS_PER_FILE_CHUNK` | Default `6000`. Files larger than this are hunk-split. |
 | `MAX_LLM_CALLS_PER_RUN` | Default `80`. Hard cap to bound cost on monorepo PRs. |
+| `ANALYZE_CONCURRENCY` | Default `4`. Bounded fan-out for the analyze node (1 = sequential, internally clamped to [1, 8]). Tune up for fast monorepo runs, down to 1 to keep traces strictly sequential. |
 
 ---
 
@@ -205,7 +206,7 @@ If `LANGFUSE_*` env is absent, the decorators are no-ops — the agent still run
 
 The job post asks *"what breaks first at 1000x scale?"* — so here it is for this agent:
 
-1. **Cost.** Addressed in this build via prompt caching + Haiku triage (see *Cost analysis*). Next move: **bounded concurrency** in analyze (currently sequential — `asyncio.Semaphore(4-8)` would 4-8x throughput at no extra cost).
+1. **Cost.** Addressed in this build via prompt caching + Haiku triage + **bounded concurrency** in the analyze fan-out (`ThreadPoolExecutor` capped at `ANALYZE_CONCURRENCY`, default 4). Same total LLM cost, ~4× lower wall-clock on multi-file PRs. See *Cost analysis* for the cost numbers.
 2. **GitHub secondary rate limits.** PyGithub doesn't surface these well. **Fix:** backoff on 403, dedupe comments by file:line hash on re-runs (idempotent reviews).
 3. **Prompt drift without evals.** The spec explicitly lists "eval frameworks for non-deterministic systems" as a role tech area. **Fix:** golden-set of (PR diff → expected finding categories) pairs; run as CI on every prompt change. Langfuse Datasets fits this naturally.
 4. **Reviewer signal decay.** CODEOWNERS goes stale; `git blame` returns people who left. **Fix:** decay-weight blame toward last-90-days commits; cross-check assignees against active org membership.
@@ -266,7 +267,7 @@ Tests cover deterministic logic (chunking, risk scoring, CODEOWNERS parsing). LL
 ## Future work (deliberately deferred for the 6-hour cap)
 
 - Provider fallback (Claude → OpenAI) via LiteLLM or hand-rolled wrapper
-- Bounded concurrency in analyze (currently sequential)
+- ~~Bounded concurrency in analyze~~ (shipped — `ThreadPoolExecutor` with `ANALYZE_CONCURRENCY` env knob, OTel context propagated per worker)
 - Comment dedupe across re-runs against the same PR (idempotent reviews)
 - Eval harness — golden-set regression tests for prompt changes (Langfuse Datasets)
 - Team mentions in CODEOWNERS (separate GitHub API param)
