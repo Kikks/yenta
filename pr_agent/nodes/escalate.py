@@ -1,8 +1,266 @@
-"""Escalate node — stub. Filled in Phase 4."""
+"""Escalate node — pick reviewers, post line comments, leave each
+assignee a targeted top-level comment.
+
+Reviewer selection — explicit precedence so the interview answer is short:
+  1. CODEOWNERS owners for each changed path. Last-match-wins per file.
+  2. If we end up with zero unique owners, fall back to the top recent
+     committers across the touched paths (weighted recency vote).
+  3. Filter out the PR author (GitHub won't accept them anyway).
+  4. Cap to 3 reviewers — too many reviewers is noise.
+
+We also leave **one issue comment per assigned reviewer** that @-mentions
+them and lists the specific files/lines they should focus on, drawn from
+findings that touched paths they own (or, for blame-fallback reviewers,
+the files they recently committed to).
+"""
 from __future__ import annotations
 
-from ..state import GraphState
+import json
+import logging
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+try:
+    from langfuse.decorators import observe
+except Exception:  # pragma: no cover
+    def observe(*_a, **_k):
+        def deco(fn):
+            return fn
+
+        return deco
+
+from github.GithubException import GithubException
+
+from ..config import MODE_PROFILES, RuntimeConfig
+from ..github_client import GitHubClient, collapse_committers
+from ..llm import LLM
+from ..reviewers import owners_for_path, parse_codeowners, split_user_and_team
+from ..state import Finding, GraphState, ReviewerAssignment
+
+log = logging.getLogger(__name__)
+
+_SUMMARY_PROMPT = Path(__file__).resolve().parent.parent.parent / "prompts" / "summary.md"
 
 
-def escalate_node(state: GraphState) -> dict:
-    return {}
+def _select_reviewers(
+    state: GraphState, viewer_login: str
+) -> tuple[list[ReviewerAssignment], dict[str, list[str]]]:
+    """Returns (assignments, owners_by_file) for downstream comment routing."""
+    assignments: list[ReviewerAssignment] = []
+    owners_by_file: dict[str, list[str]] = {}
+
+    pr_author = state.pr_meta.author if state.pr_meta else ""
+    skip = {pr_author.lower(), viewer_login.lower(), ""}
+
+    # --- step 1: CODEOWNERS ---
+    rules = parse_codeowners(state.codeowners_raw) if state.codeowners_raw else []
+    user_to_paths: dict[str, list[str]] = defaultdict(list)
+    if rules:
+        for f in state.files:
+            owners = owners_for_path(rules, f.path)
+            owners_by_file[f.path] = owners
+            for o in owners:
+                token, is_team = split_user_and_team(o)
+                if is_team:
+                    # Teams need a different API param; we skip them in v1
+                    # rather than half-implement, and note it in README.
+                    continue
+                if token.lower() in skip:
+                    continue
+                user_to_paths[token].append(f.path)
+
+    # Prefer CODEOWNERS-derived users; sort by # owned paths desc.
+    codeowner_users = sorted(user_to_paths.keys(), key=lambda u: -len(user_to_paths[u]))
+
+    # --- step 2: blame fallback (only if we have <2 codeowners) ---
+    if len(codeowner_users) < 2:
+        blame_top = collapse_committers(state.recent_committers, top_n=5)
+        for login in blame_top:
+            if login.lower() in skip or login in codeowner_users:
+                continue
+            codeowner_users.append(login)
+            # Map this user to the files they recently committed to.
+            user_to_paths[login] = [
+                path
+                for path, logins in state.recent_committers.items()
+                if login in logins
+            ]
+
+    # --- step 3: cap to 3 ---
+    chosen = codeowner_users[:3]
+
+    for login in chosen:
+        paths = user_to_paths.get(login, [])
+        source = "CODEOWNERS" if rules and any(
+            login in [u for u in owners_by_file.get(p, [])] for p in paths
+        ) else "recent commit history (blame fallback)"
+        # Findings the model already flagged on this user's paths.
+        owned_findings = [
+            f for f in state.findings if f.file_path in paths
+        ]
+        focus = _focus_text(owned_findings, paths)
+        assignments.append(
+            ReviewerAssignment(
+                login=login,
+                reason=f"Selected via {source}; owns/touched {len(paths)} file(s) in this PR.",
+                focus=focus,
+            )
+        )
+
+    return assignments, owners_by_file
+
+
+def _focus_text(findings: list[Finding], paths: list[str]) -> str:
+    if findings:
+        lines = []
+        # Group up to 5 most-severe findings.
+        severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        for f in sorted(findings, key=lambda x: severity_order.get(x.severity, 99))[:5]:
+            loc = f"`{f.file_path}`" + (f":L{f.line}" if f.line else "")
+            lines.append(f"- **{f.severity}/{f.category}** {loc} — {f.rationale}")
+        return "\n".join(lines)
+    if paths:
+        return "No specific findings on your paths; please give them a sanity pass:\n" + "\n".join(
+            f"- `{p}`" for p in paths[:10]
+        )
+    return "Please review the PR end-to-end."
+
+
+def _line_comments_from_findings(state: GraphState) -> list[dict]:
+    """Map findings to GitHub line-comment payloads.
+
+    GitHub only accepts comments on lines that are actually part of the
+    diff. We don't have the position mapping locally; PyGithub's
+    create_review with `line` + `side='RIGHT'` works for any line on the
+    new side of the diff. Findings without a line become PR-level
+    bullet points in the summary body (handled by escalate's main body).
+    """
+    out: list[dict] = []
+    for f in state.findings:
+        if f.line is None:
+            continue
+        body = f"**{f.severity}/{f.category}** — {f.rationale}"
+        if f.suggestion:
+            body += f"\n\n**Suggested fix:** {f.suggestion}"
+        out.append({"path": f.file_path, "line": f.line, "side": "RIGHT", "body": body})
+    return out
+
+
+def _render_summary(state: GraphState, llm: LLM) -> str:
+    pr = state.pr_meta
+    findings_payload = [
+        {
+            "file": f.file_path,
+            "line": f.line,
+            "severity": f.severity,
+            "category": f.category,
+            "rationale": f.rationale,
+        }
+        for f in state.findings
+    ]
+    template = _SUMMARY_PROMPT.read_text(encoding="utf-8")
+    user = template.format(
+        owner=pr.owner if pr else "",
+        repo=pr.repo if pr else "",
+        pr_number=pr.number if pr else 0,
+        pr_title=pr.title if pr else "",
+        author=pr.author if pr else "unknown",
+        mode=state.mode,
+        decision=state.decision or "unknown",
+        risk_score=state.risk_score,
+        findings_json=json.dumps(findings_payload, indent=2),
+        file_count=len(state.files),
+        additions=pr.additions if pr else 0,
+        deletions=pr.deletions if pr else 0,
+        truncated=str(state.truncated).lower(),
+        is_fork=str(pr.is_fork if pr else False).lower(),
+    )
+    return llm.complete(
+        system="You are a senior engineer writing the top-level PR review comment.",
+        user=user,
+        max_tokens=700,
+        temperature=0.3,
+        metadata={
+            "node": "escalate.summary",
+            "pr_url": state.pr_url,
+            "mode": state.mode,
+        },
+    )
+
+
+def _agent_signature(state: GraphState) -> str:
+    bd = ", ".join(f"{k}={v}" for k, v in state.risk_breakdown.items())
+    return (
+        f"\n\n---\n"
+        f"_Posted by the PR Review Agent — mode: `{state.mode}` · "
+        f"risk: `{state.risk_score}` ({bd}) · "
+        f"decision: `{state.decision}`._"
+    )
+
+
+@observe(name="node.escalate")
+def escalate_node(state: GraphState) -> dict[str, Any]:
+    cfg = RuntimeConfig.from_env()
+    gh = GitHubClient(cfg.github_token)
+    llm = LLM(cfg)
+    profile = MODE_PROFILES[state.mode]
+    assert state.pr_meta
+
+    pr = gh.pull(state.pr_meta.owner, state.pr_meta.repo, state.pr_meta.number)
+    try:
+        viewer = gh.viewer_login
+    except GithubException:
+        viewer = ""
+
+    # --- pick reviewers + craft per-reviewer focus ---
+    assignments, _owners_by_file = _select_reviewers(state, viewer)
+
+    # --- build the main review (summary + line comments) ---
+    summary = _render_summary(state, llm)
+    body = summary + _agent_signature(state)
+    line_comments = _line_comments_from_findings(state)
+
+    review_url: str | None = None
+    try:
+        review = gh.post_review(
+            pr,
+            body=body,
+            event=profile.review_event_on_escalate,
+            comments=line_comments,
+        )
+        review_url = getattr(review, "html_url", state.pr_meta.url)
+    except GithubException as e:
+        # Most common failure: a line we suggested isn't in the diff.
+        # Retry without line comments rather than dropping the whole review.
+        log.warning("review with line comments failed (%s); retrying body-only", e)
+        try:
+            review = gh.post_review(
+                pr, body=body, event=profile.review_event_on_escalate, comments=[]
+            )
+            review_url = getattr(review, "html_url", state.pr_meta.url)
+        except GithubException as e2:
+            log.exception("review post failed even body-only")
+            return {"errors": state.errors + [f"escalate review failed: {e2}"]}
+
+    # --- request reviewers on GitHub ---
+    logins = [a.login for a in assignments]
+    if logins:
+        gh.request_reviewers(pr, logins)
+
+    # --- one targeted issue comment per reviewer ---
+    for a in assignments:
+        msg = (
+            f"@{a.login} — tagged you on this PR.\n\n"
+            f"**Why you:** {a.reason}\n\n"
+            f"**Focus:**\n{a.focus}"
+        )
+        try:
+            gh.post_issue_comment(pr, msg)
+        except GithubException as e:
+            log.warning("per-reviewer comment failed for @%s: %s", a.login, e)
+
+    return {
+        "review_url": review_url,
+        "reviewers_assigned": assignments,
+    }
