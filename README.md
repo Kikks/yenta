@@ -1,46 +1,96 @@
 # Yenta 👵
 
-> _Yiddish, n. A matchmaker. Also: a busybody who has opinions about your business._
+> *Yiddish, n. A matchmaker. Also: a busybody who has opinions about your business.*
 
-A LangGraph PR review agent that triages every changed file with Claude Haiku, deep-reviews the non-trivial ones with Claude Sonnet, and either **auto-approves** or **escalates** to specific human reviewers with file/line-cited comments.
-
-Yenta reads a PR end-to-end, forms opinions about it, and then decides what to do — **auto-approve quietly when the change is low-risk, or escalate with line-cited comments when it isn't**. She's a self-sufficient reviewer first; the human reviewers only come in when she escalates.
-
-The name is a wink. A *Yenta* is a Yiddish matchmaker who also happens to have strong opinions about everything she sees — and both halves of that joke apply here. On the escalate branch she matches the diff to the right humans (CODEOWNERS first, `git blame` as a fallback) and tells each one *specifically what to focus on*, drawn from her actual findings on the files they own.
+A LangGraph PR review agent. Triages every changed file with Claude Haiku, deep-reviews the non-trivial ones with Claude Sonnet, then either **auto-approves** or **escalates** to specific human reviewers (picked from CODEOWNERS, with `git blame` as fallback) with file/line-cited comments.
 
 Built for the [Numeo AI Product Engineering Challenge](https://github.com/numeo-ai/numeo-ai-product-engineering-challenge) inside the 6-hour cap.
 
 ---
 
-## Demo
+## What I shipped (and what dogfooding caught)
 
-**Demo PR**: _link to be added — see the run notes below._
+| Step | Outcome |
+|---|---|
+| Built the agent end-to-end | LangGraph DAG: fetch → chunk → Haiku triage → Sonnet analyze (bounded concurrency, cached prompt) → deterministic risk score → decide → approve/escalate. ~$0.02 per typical PR. |
+| Ran Yenta against [her own first PR](https://github.com/Kikks/yenta/pull/1) | She **hallucinated TypeScript filenames** (`cli.ts`, `postInlineComments`) on a Python codebase. Diagnosed root cause, shipped a targeted fix in <30 LOC, re-ran clean. Receipts below. |
+| Ran Yenta against the [borderline concurrency PR](https://github.com/Kikks/yenta/pull/2) | She caught a **real correctness bug in my own code**: budget cap is enforced at submit time but in-flight workers don't re-check. Auto-approved at risk 18/100 with the finding surfaced. |
+| Ran Yenta against the [hallucination fix](https://github.com/Kikks/yenta/pull/3) | Self-reviewed clean, real Python paths cited, risk 0/100. Auto-approve. |
 
-Yenta has been exercised end-to-end against multiple PRs across two modes. On each run she:
+The agent isn't just shipped — it was *used* against its own changes, *failed*, was *fixed*, and *re-ran clean*. That loop is the part of the build I'd most want to talk about in interview.
 
-1. Fetches the PR + files + CODEOWNERS + recent committers
-2. Runs Haiku triage on every changed file (cheap pass — skips lockfiles, formatting, generated stubs)
-3. Runs Sonnet analyze on the files triage kept (cached system prompt → ~60% cheaper after the first call)
-4. Computes a deterministic risk score
-5. **Auto-approves quietly** when risk is under the mode threshold, or **escalates with line comments + reviewer assignments** when it isn't
-6. Captures every LLM call to Langfuse (prompt, model, output, tokens, cache hits, latency)
+---
 
-To reproduce the demo end-to-end, see the *How to run against any PR* section below.
+## The dogfooding story (with receipts)
+
+### Before — Yenta hallucinated her own PR
+
+Asked to review [PR #1](https://github.com/Kikks/yenta/pull/1) (a Python CLI flag), she said:
+
+> Approving — this is a clean, well-scoped addition that adds a `--max-findings` flag to control the inline-comment cap per run.
+>
+> The PR introduces a new CLI flag with sensible defaults (50), wires it through the config layer, and updates the comment-posting logic to respect the limit. **The implementation is straightforward: argument parsing in `cli.ts`, config propagation, and enforcement in `postInlineComments`.** Documentation and help text are both updated.
+>
+> No findings surfaced during review. The code is type-safe...
+
+`cli.ts` doesn't exist. `postInlineComments` doesn't exist. The default is 5, not 50. "Type-safe" is TypeScript flavor on a Python project. Every concrete claim is fabricated.
+
+### Diagnosis
+
+The summary prompt's inputs were the PR title, `findings_json`, and raw counts (file count, additions, deletions) — but **never the actual list of changed files**.
+
+On escalate runs this isn't fatal because each finding in `findings_json` carries a real `file_path` for the model to anchor on. But on **auto-approve runs with zero findings**, `findings_json == []` and the model has nothing but a title and three integers. So it does what models do with thin context: pattern-matches its way to a plausible-sounding lie. *"PR adds a CLI flag → must touch a CLI file → probably `cli.ts` → probably TypeScript → probably has a `postInlineComments` function."*
+
+This is the worst-case shape for hallucination: thin context, plausibility-seeking model, no grounding. Caught only by *running the agent against the agent's own code*.
+
+### Fix ([PR #3](https://github.com/Kikks/yenta/pull/3))
+
+Two changes, ~30 LOC across three files:
+
+1. Pass `files_json` (path/status/additions/deletions per file) into the `summary.md` template.
+2. Extend the no-speculation rule from `analyze.md` to `summary.md`: *"refer only to files in `files_json`; never invent paths; if `findings_json` is empty, describe scope from the file list — do not speculate about contents you cannot see."*
+
+### After — re-ran on the same PR
+
+> Auto-approving — this PR introduces a `--max-findings` CLI flag to control the inline-comment cap, a sensible quality-of-life improvement for tuning review verbosity.
+>
+> The change touches four files: **`main.py` adds the new argument parser logic (+39/-4), `pr_agent/state.py` extends the state model (+5), `pr_agent/nodes/escalate.py` adjusts escalation behavior (+12/-6), and `README.md` documents the new flag (+4/-3)**. One file was skipped during triage as uninteresting.
+
+Real paths. Real diff sizes. No fabrication. The grounding rule did its job.
+
+### Bonus — Yenta caught a real bug in PR #2
+
+[PR #2 (bounded concurrency)](https://github.com/Kikks/yenta/pull/2) shipped `ThreadPoolExecutor` parallelism in the analyze node. Yenta reviewed it and surfaced this:
+
+> **Correctness (medium):** The budget-exceeded check breaks the submission loop, but in-flight workers continue executing and consuming budget. This can lead to overspend in high-concurrency scenarios.
+
+She's right. The submit loop checks `_calls_made < cap` *before submitting* a worker, but a worker already in flight when the cap is reached will still call the LLM. With concurrency 4–8 the overshoot is bounded and small, but the finding is legitimate. Logged in *Future work* below. **The agent did exactly what it should: borderline change, real finding, auto-approve in conservative mode (risk 18/100), specific fix suggestion in the review body.**
+
+---
+
+## Demo PRs
+
+| PR | What it tests | Outcome |
+|---|---|---|
+| [#1 — `--max-findings` flag](https://github.com/Kikks/yenta/pull/1) | Clean auto-approve path. Also exposed the hallucination bug. | Hallucinated pre-fix; clean grounded review post-fix. |
+| [#2 — Bounded concurrency](https://github.com/Kikks/yenta/pull/2) | Borderline change. Concurrency code is intrinsically risk-prone. | Auto-approved at risk 18/100 with one real correctness finding. |
+| [#3 — Summary grounding fix](https://github.com/Kikks/yenta/pull/3) | Self-review of the fix that fixes the bug from #1. | Clean auto-approve at risk 0/100; real file paths cited. |
+
+To reproduce: `python main.py <PR_URL> --mode conservative --dry-run`
 
 ---
 
 ## Quick start
 
 ```bash
-git clone <this repo>
-cd yenta
+git clone <this repo> && cd yenta
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # fill in your tokens
-python main.py https://github.com/<org>/<repo>/pull/<n> --mode conservative --dry-run
+cp .env.example .env  # fill in tokens
+python main.py <PR_URL> --mode conservative --dry-run
 ```
 
-When the dry-run output looks right, drop `--dry-run` and run for real.
+Drop `--dry-run` to post for real.
 
 ### CLI
 
@@ -48,25 +98,24 @@ When the dry-run output looks right, drop `--dry-run` and run for real.
 python main.py <PR_URL> --mode {conservative|aggressive} [--dry-run] [--max-findings N]
 ```
 
-- `PR_URL` — full URL, e.g. `https://github.com/octocat/Hello-World/pull/42`
-- `--mode conservative` — escalates eagerly (threshold 50), `REQUEST_CHANGES` event on escalate
-- `--mode aggressive` — auto-approves more readily (threshold 80), softer `COMMENT` event
-- `--dry-run` — runs the full pipeline (Haiku triage + Sonnet analyze + risk score + decision + reviewer selection + summary) **without posting to GitHub**. Always do this first on a new PR.
-- `--max-findings N` (default `5`) — cap on inline line comments on escalate. Findings beyond the cap fold into a collapsed `<details>` block in the review body. Tune up for verbose audits, down for tight demos.
+- `--mode conservative` — escalates eagerly (threshold 25), `REQUEST_CHANGES` event on escalate
+- `--mode aggressive` — auto-approves more readily (threshold 60), softer `COMMENT` event
+- `--dry-run` — full pipeline without GitHub writes. Always do this first.
+- `--max-findings` — cap inline line comments per review (default 5)
 
 ### Required env (see `.env.example`)
 
 | Var | Why |
 |---|---|
 | `GITHUB_TOKEN` | PAT with `repo` + `read:org`. The agent posts as this account. |
-| `ANTHROPIC_API_KEY` | Claude API key |
+| `ANTHROPIC_API_KEY` | Claude API key. |
 | `ANTHROPIC_MODEL` | Sonnet for deep review. Default `claude-sonnet-4-5`. |
 | `ANTHROPIC_TRIAGE_MODEL` | Haiku for triage. Default `claude-haiku-4-5`. |
-| `TRIAGE_ENABLED` | Default `1`. Set to `0` to skip the triage step (e.g. when running against PRs you know are 100% real code). |
-| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | Optional but recommended. Without these, traces are no-op. |
+| `TRIAGE_ENABLED` | Default `1`. Set to `0` to skip triage. |
+| `LANGFUSE_*` | Optional. No-op if absent. |
 | `MAX_TOKENS_PER_FILE_CHUNK` | Default `6000`. Files larger than this are hunk-split. |
 | `MAX_LLM_CALLS_PER_RUN` | Default `80`. Hard cap to bound cost on monorepo PRs. |
-| `ANALYZE_CONCURRENCY` | Default `4`. Bounded fan-out for the analyze node (1 = sequential, internally clamped to [1, 8]). Tune up for fast monorepo runs, down to 1 to keep traces strictly sequential. |
+| `ANALYZE_CONCURRENCY` | Default `4` (clamped 1–8). |
 
 ---
 
@@ -77,7 +126,7 @@ flowchart TD
     A["CLI<br/>main.py"] --> B["fetch<br/>PR meta · files · CODEOWNERS · blame"]
     B --> C["chunk<br/>per-file, then per-hunk over budget"]
     C --> T["triage<br/>Haiku per chunk:<br/>review or skip"]
-    T --> D["analyze<br/>Sonnet on kept chunks<br/>cached system prompt<br/>structured JSON findings"]
+    T --> D["analyze<br/>Sonnet on kept chunks<br/>cached system prompt<br/>bounded concurrency"]
     D --> E["aggregate<br/>deterministic risk score 0-100+"]
     E --> F{"decide<br/>risk under mode threshold?"}
     F -->|yes| G["approve<br/>summary + APPROVE<br/>self-PR downgrades to COMMENT"]
@@ -93,27 +142,15 @@ flowchart TD
 
 ### Three responsibilities, three nodes
 
-- **triage (Haiku)** — fast/cheap perception. Per chunk: "is this worth a deep review, or is it a lockfile bump / formatting change / generated stub?" Defaults to `review` on any uncertainty. Skipped chunks are tracked separately in `state.triage_skipped` (NOT added as findings, so they don't inflate the risk score).
-- **analyze (Sonnet)** — deep perception. Per non-skipped chunk: structured JSON findings (severity, category, file, line, rationale, optional suggestion). System prompt is large (~1600 tokens, hits Anthropic's 1024-token cache threshold) and identical across the fan-out → prompt caching reduces input cost on the cached portion to 0.1x.
-- **aggregate + decide (code, not LLM)** — deterministic risk score from findings + sensitive-path bonus + PR-size curve + fork bonus + truncation bonus. Decision is 2 lines: `risk_score >= MODE_PROFILES[mode].escalate_threshold`.
+- **triage (Haiku)** — fast, cheap perception. Per chunk: "review this or skip it?" Defaults to `review` on uncertainty. Skipped chunks tracked separately so they never inflate the risk score.
+- **analyze (Sonnet)** — deep perception. Per kept chunk: structured JSON findings (severity, category, file, line, rationale, optional suggestion). System prompt (~1600 tok) is cached and identical across the fan-out → ~10x cheaper on cached tokens after the first call.
+- **aggregate + decide (code, not LLM)** — deterministic risk score from findings + sensitive-path bonus + size curve + fork bonus + truncation bonus. Decision is two lines: `risk_score >= MODE_PROFILES[mode].escalate_threshold`.
 
-### Why LangGraph and not "just an agent loop"
+### Why LLM perceives, code decides
 
-The flow is a fixed DAG with one branch point. A `StateGraph` is the right level of abstraction:
+The model is the perception layer. The decision layer is deterministic Python. Same findings → same decision, every run. The interview panel can point at one number per mode (the threshold) and ask "why?" — and there's an answer that doesn't depend on temperature.
 
-- **Auditable** — each node has one job; the diagram IS the runtime behavior
-- **Testable** — node functions take `GraphState` and return a state delta; trivially unit-testable
-- **Defensible** — I can point at any node in interview and explain why it's there
-
-A free-form ReAct loop would have been cute but worse on testability and observability.
-
-### Why LLM does perception, code does decision
-
-The Haiku triage produces a literal decision (review/skip). The Sonnet analyze produces structured findings. A **deterministic function** (`aggregate.py`) computes the risk score. A **two-line decision** (`decide.py`) compares it to a mode-specific threshold.
-
-- Reproducible — same findings → same decision, run after run.
-- Auditable — interview panel can point at one number per mode (the threshold) and ask "why?".
-- The model is never the judge. That's the failure mode for most LLM agents.
+A free-form ReAct loop would have been cute but worse on testability and observability. A `StateGraph` is exactly the right level of abstraction for a fixed DAG with one branch point.
 
 ---
 
@@ -127,75 +164,75 @@ Real numbers from the demo PR (3 files, +29 LOC):
 | v2 (Sonnet analyze caching) | $0.022 |
 | v3 (caching + Haiku triage) | $0.023 |
 
-For this 3-file PR, triage adds a small cost (no chunks skipped — all are real React code) but in exchange we get insurance against monorepo PRs.
+For a 3-file PR, triage adds slight cost (no chunks skipped — all real React code) but buys insurance against monorepo PRs.
 
 ### Scaling to Numeo
 
-| PR shape | v1 cost | v3 cost | Why |
-|---|---|---|---|
-| Typical PR (~20 files of mixed real-code + boilerplate) | ~$0.20 | ~$0.10 | Caching halves analyze cost; triage skips ~30% boilerplate |
-| Monorepo PR (~80 files w/ lockfile bumps, generated stubs) | ~$0.80 | ~$0.25 | Triage skip rate climbs to 50-60%; cache stays warm |
-| 100 PRs/day | $20-80/day | $10-25/day | |
-| 1000 PRs/day | $200-800/day | $100-250/day | |
+| PR shape | v1 cost | v3 cost |
+|---|---|---|
+| Typical PR (~20 files mixed) | ~$0.20 | ~$0.10 |
+| Monorepo PR (~80 files w/ lockfiles, generated stubs) | ~$0.80 | ~$0.25 |
+| 100 PRs/day | $20–80/day | $10–25/day |
+| 1000 PRs/day | $200–800/day | $100–250/day |
 
-### How the cache actually wins
+### How the cache wins
 
 ```
-call #1:  cache_create=1660, in=661  ← write phase (1.25x normal cost for cached tokens)
-call #2:  cache_create=0,    in=658, cache_read=1660  ← HIT (0.1x normal cost)
-call #3:  cache_create=0,    in=253, cache_read=1660  ← HIT
+call #1:  cache_create=1660, in=661                       ← write phase (1.25x normal)
+call #2:  cache_create=0,    in=658, cache_read=1660      ← HIT (0.1x normal)
+call #3:  cache_create=0,    in=253, cache_read=1660      ← HIT
 ```
 
-Above is real Langfuse output from the demo PR. The 1660 cached tokens are the analyze system prompt (rules + schema + examples).
+Real Langfuse output. The 1660 cached tokens are the analyze system prompt (rules + schema + examples).
 
 ---
 
 ## Design decisions (where the spec is deliberately ambiguous)
 
-| Question the spec leaves open | Decision | Why |
+| Question | Decision | Why |
 |---|---|---|
-| What defines "risk"? | Severity-weighted findings + sensitive-path bonus (`auth/`, `migrations/`, `.env`, workflows, etc.) + PR-size curve + fork bonus + truncation bonus | Auditable. LLM perceives; code decides. |
+| What defines "risk"? | Severity-weighted findings + sensitive-path bonus (`auth/`, `migrations/`, `.env`, workflows) + size curve + fork bonus + truncation bonus. | Auditable. LLM perceives; code decides. |
 | Mode difference, *concretely*? | Two knobs: **escalate threshold** (conservative 25, aggressive 60) and **review event** (REQUEST_CHANGES vs COMMENT). Aggressive also drops `low`-severity findings from comments. | Two-knob design keeps modes meaningfully different without sprawl. |
-| How are reviewers picked? | CODEOWNERS last-match-wins per file → blame fallback (recency-weighted vote across changed paths) → drop PR author and agent-token-owner → cap 3. | Mirrors what real teams do. Degrades gracefully. |
-| Line comments vs PR-level? | Both. Findings with a line number become GitHub line comments; the summary is the review body. Reviewer assignments go through `request_reviewers`; one combined issue comment (NOT N separate ones) addresses each assignee with their specific files/lines. | What a thoughtful human reviewer does, without flooding the PR. |
-| Huge PRs (5K/5K)? | Per-file fan-out → hunk-split via `unidiff` when one file overruns `MAX_TOKENS_PER_FILE_CHUNK` → hard cap on total LLM calls. Hit the cap → `state.truncated=True` and the final review honestly says what wasn't reviewed. | Structurally scales; never silently drops. |
-| Fork PRs? | Fork bonus (+10) on the risk score plus a safety floor: any fork PR with findings escalates regardless of mode. | Untrusted contributor. Defense in depth. |
-| Self-PR? | Detected via `viewer.login == pr_author`. APPROVE / REQUEST_CHANGES are both rejected by GitHub on your own PR (422). The agent downgrades both to COMMENT. Line comments and reviewer assignment still post. | Real-world failure mode; the agent handles it instead of crashing. |
-| Re-runs on the same PR? | Each run posts a new review. No dedupe in v1. | Documented limitation. Dedupe is in *Future work*. |
-| Hard escalations? | Any `critical` severity finding OR fork PR with any findings → escalate regardless of score. | Safety floor that overrides mode tuning. |
-| Triage false skip? | Triage prompt explicitly says "when in doubt, choose review". On Haiku timeout / JSON parse fail → default to review for that chunk. | Cost of a false skip is much higher than a false review. |
+| How are reviewers picked? | CODEOWNERS last-match-wins per file → blame fallback (recency-weighted vote) → drop PR author and agent-token-owner → cap 3. | Mirrors what real teams do. Degrades gracefully. |
+| Huge PRs (5K/5K)? | Per-file fan-out → hunk-split via `unidiff` when one file overruns the chunk budget → hard cap on total LLM calls → `state.truncated=True` if hit, surfaced honestly in the review. | Structurally scales; never silently drops. |
+| Hard escalations? | Any `critical` finding OR fork PR with any finding → escalate regardless of score. | Safety floor that overrides mode tuning. |
+
+<details>
+<summary>More design decisions</summary>
+
+| Question | Decision | Why |
+|---|---|---|
+| Line vs PR-level comments? | Both. Findings with a line become inline comments; the summary is the review body. Reviewer assignments via `request_reviewers`; one combined issue comment (NOT N) addresses each assignee with their files/lines. | What a thoughtful human does, without flooding the PR. |
+| Fork PRs? | Fork bonus (+10) plus a safety floor: any fork PR with findings escalates regardless of mode. | Untrusted contributor. Defense in depth. |
+| Self-PR? | Detected via `viewer.login == pr_author`. APPROVE / REQUEST_CHANGES are rejected by GitHub on your own PR (422). The agent downgrades both to COMMENT. Line comments and reviewer assignment still post. | Real-world failure mode the agent handles instead of crashing. |
+| Re-runs? | Each run posts a new review. No dedupe in v1. | Documented limitation. Dedupe in *Future work*. |
+| Triage false skip? | Triage prompt explicitly says "when in doubt, choose review". On Haiku timeout / JSON parse fail → default to review. | Cost of a false skip is much higher than a false review. |
+
+</details>
 
 ---
 
 ## Observability — Langfuse
 
-For every LLM call, Langfuse captures:
-
-- **input** (full system + user prompt)
-- **output** (raw text from the model)
-- **model** (Sonnet vs Haiku — visible per call)
-- **usage_details** (`input`, `output`, `cache_creation_input`, `cache_read_input`, `total`)
-- **latency** (auto-captured)
-- **metadata** (`node`, `file_path`, `hunk_index`, `pr_url`, `mode`, `cache_system`)
+Every LLM call captures: full prompt (system + user), output, model, usage breakdown (input / output / cache_create / cache_read / total), latency, and metadata (`node`, `file_path`, `pr_url`, `mode`).
 
 Trace hierarchy:
 
 ```
 pr-review/<owner>/<repo>#<n>          ← root, tagged {mode, repo, dry-run?}
-├─ node.fetch                         ← span
-├─ node.chunk                         ← span
-├─ node.triage                        ← span
-│  ├─ anthropic.messages.create       ← generation (Haiku, file_a.js)
-│  ├─ anthropic.messages.create       ← generation (Haiku, file_b.js)
+├─ node.fetch
+├─ node.chunk
+├─ node.triage
+│  ├─ anthropic.messages.create       ← Haiku, file_a.js
 │  └─ ...
-├─ node.analyze                       ← span
-│  ├─ anthropic.messages.create       ← generation (Sonnet, file_a.js, cache_write)
-│  ├─ anthropic.messages.create       ← generation (Sonnet, file_b.js, cache_read)
+├─ node.analyze
+│  ├─ anthropic.messages.create       ← Sonnet, file_a.js, cache_write
+│  ├─ anthropic.messages.create       ← Sonnet, file_b.js, cache_read
 │  └─ ...
-├─ node.aggregate                     ← span (input: finding count; output: risk score)
-├─ node.decide                        ← span
-└─ node.approve OR node.escalate      ← span
-   └─ anthropic.messages.create       ← generation (Sonnet, summary)
+├─ node.aggregate
+├─ node.decide
+└─ node.approve OR node.escalate
+   └─ anthropic.messages.create       ← Sonnet, summary
 ```
 
 If `LANGFUSE_*` env is absent, the decorators are no-ops — the agent still runs.
@@ -204,16 +241,16 @@ If `LANGFUSE_*` env is absent, the decorators are no-ops — the agent still run
 
 ## What breaks at 1000x scale (and how I'd fix it)
 
-The job post asks *"what breaks first at 1000x scale?"* — so here it is for this agent:
+The job post asks *"what breaks first at 1000x scale?"* — so:
 
-1. **Cost.** Addressed in this build via prompt caching + Haiku triage + **bounded concurrency** in the analyze fan-out (`ThreadPoolExecutor` capped at `ANALYZE_CONCURRENCY`, default 4). Same total LLM cost, ~4× lower wall-clock on multi-file PRs. See *Cost analysis* for the cost numbers.
-2. **GitHub secondary rate limits.** PyGithub doesn't surface these well. **Fix:** backoff on 403, dedupe comments by file:line hash on re-runs (idempotent reviews).
-3. **Prompt drift without evals.** The spec explicitly lists "eval frameworks for non-deterministic systems" as a role tech area. **Fix:** golden-set of (PR diff → expected finding categories) pairs; run as CI on every prompt change. Langfuse Datasets fits this naturally.
-4. **Reviewer signal decay.** CODEOWNERS goes stale; `git blame` returns people who left. **Fix:** decay-weight blame toward last-90-days commits; cross-check assignees against active org membership.
-5. **No memory across PRs in a series.** Stacked PRs each reviewed in isolation. **Fix:** small vector store of recent reviews keyed by (author, repo) so we can flag "you keep introducing X".
-6. **Provider single-point-of-failure.** Today Claude-only. **Fix:** thin provider abstraction (LiteLLM or hand-rolled) with Claude primary, OpenAI fallback on 5xx — explicitly deferred for the 6-hour budget.
-7. **The two-identities self-reviewer edge case** (which the demo PR exposes). **Fix:** `SELF_IDENTITIES` env var letting an operator declare multiple GitHub logins as "all me".
-8. **Cache TTL.** Anthropic's ephemeral cache is 5 minutes. Across 1000 PRs/day, cache hit rate is high when the same PR is reviewed multiple times in quick succession, but the daily cache hit rate is mostly the analyze-system reuse within a single PR's per-file fan-out. **Fix at higher volume:** consider the longer-term 1-hour beta cache if Anthropic exposes it stably.
+1. **Cost.** Addressed via prompt caching + Haiku triage (see above). [PR #2](https://github.com/Kikks/yenta/pull/2) added bounded concurrency in analyze (4–8x throughput at no extra cost).
+2. **In-flight budget overshoot** — *found by Yenta on PR #2*. The submit loop checks the cap, but workers already in flight when the cap is hit will still call the LLM. **Fix:** workers re-check the budget cap inside the lock just before the LLM call and abort if exceeded.
+3. **GitHub secondary rate limits.** PyGithub doesn't surface them well. **Fix:** backoff on 403, dedupe comments by `(file, line, hash)` on re-runs (idempotent reviews).
+4. **Prompt drift without evals.** The spec explicitly lists "eval frameworks for non-deterministic systems." **Fix:** golden-set of (PR diff → expected finding categories) pairs; CI on every prompt change. Langfuse Datasets fits naturally.
+5. **Reviewer signal decay.** CODEOWNERS goes stale; `git blame` returns people who left. **Fix:** decay-weight blame toward last-90-days; cross-check assignees against active org membership.
+6. **No memory across PRs in a series.** Stacked PRs reviewed in isolation. **Fix:** vector store of recent reviews keyed by (author, repo) so we can flag "you keep introducing X."
+7. **Provider single-point-of-failure.** Claude-only today. **Fix:** thin provider abstraction with Claude primary, OpenAI fallback on 5xx — explicitly deferred for the 6-hour cap.
+8. **Cache TTL.** Anthropic's ephemeral cache is 5 minutes. **Fix at higher volume:** the longer-term 1-hour beta cache, if Anthropic exposes it stably.
 
 ---
 
@@ -226,7 +263,7 @@ The job post asks *"what breaks first at 1000x scale?"* — so here it is for th
 │   ├── config.py                 # RuntimeConfig + MODE_PROFILES + weights + triage knobs
 │   ├── state.py                  # Pydantic GraphState (single source of truth)
 │   ├── graph.py                  # LangGraph wiring
-│   ├── llm.py                    # Anthropic wrapper: cache, model-override, usage capture
+│   ├── llm.py                    # Anthropic wrapper: cache, model-override, usage capture, thread-safe budget
 │   ├── obs.py                    # Langfuse shim (v3-compatible, no-op fallback)
 │   ├── github_client.py          # PyGithub wrapper (one place for I/O)
 │   ├── reviewers.py              # CODEOWNERS parser (last-match-wins)
@@ -234,18 +271,18 @@ The job post asks *"what breaks first at 1000x scale?"* — so here it is for th
 │       ├── fetch.py              # All GH reads, in one place
 │       ├── chunk.py              # File -> hunk split with token budget
 │       ├── triage.py             # Haiku per-chunk skip/review decision
-│       ├── analyze.py            # Sonnet, structured findings (cached system prompt)
+│       ├── analyze.py            # Sonnet, structured findings, bounded concurrency
 │       ├── aggregate.py          # Deterministic risk score
 │       ├── decide.py             # 2-line decision
-│       ├── approve.py            # APPROVE + LLM summary
+│       ├── approve.py            # APPROVE + LLM summary (grounded in files_json)
 │       └── escalate.py           # Reviewer pick + line comments + combined per-reviewer comment
 ├── prompts/
-│   ├── triage_system.md          # Haiku triage rules (~1375 tok)
+│   ├── triage_system.md          # Haiku triage rules
 │   ├── triage_user.md            # Per-call template
-│   ├── analyze_system.md         # Sonnet analyze rules + schema (~1615 tok, cached)
+│   ├── analyze_system.md         # Sonnet analyze rules + schema (cached)
 │   ├── analyze_user.md           # Per-call template
-│   └── summary.md                # PR-level summary prompt
-├── tests/test_chunk.py           # Deterministic-logic smoke tests
+│   └── summary.md                # PR-level summary prompt (grounded in files_json + findings_json)
+├── tests/                        # 13 tests: chunking, risk scoring, CODEOWNERS, concurrency
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -253,23 +290,23 @@ The job post asks *"what breaks first at 1000x scale?"* — so here it is for th
 
 ---
 
-## Running the tests
+## Tests
 
 ```bash
 pip install -r requirements.txt
 pytest -q
 ```
 
-Tests cover deterministic logic (chunking, risk scoring, CODEOWNERS parsing). LLM-touching nodes are integration-tested by running against a real PR.
+13 tests covering deterministic logic (chunking, risk scoring, CODEOWNERS) plus thread-safety and bounded concurrency (`tests/test_analyze_concurrency.py`). LLM-touching nodes are integration-tested by running against real PRs (see *Demo PRs* above).
 
 ---
 
-## Future work (deliberately deferred for the 6-hour cap)
+## Future work (deliberately deferred)
 
-- Provider fallback (Claude → OpenAI) via LiteLLM or hand-rolled wrapper
-- ~~Bounded concurrency in analyze~~ (shipped — `ThreadPoolExecutor` with `ANALYZE_CONCURRENCY` env knob, OTel context propagated per worker)
-- Comment dedupe across re-runs against the same PR (idempotent reviews)
-- Eval harness — golden-set regression tests for prompt changes (Langfuse Datasets)
+- **In-flight budget overshoot** — surfaced by Yenta on PR #2; fix outlined in *What breaks at 1000x*.
+- Provider fallback (Claude → OpenAI) via thin abstraction
+- Comment dedupe across re-runs (idempotent reviews)
+- Eval harness — golden-set regression tests (Langfuse Datasets)
 - Team mentions in CODEOWNERS (separate GitHub API param)
 - `SELF_IDENTITIES` env var to merge multiple operator identities
 - Webhook entrypoint — currently one-shot CLI per spec
@@ -277,33 +314,8 @@ Tests cover deterministic logic (chunking, risk scoring, CODEOWNERS parsing). LL
 
 ---
 
-## AI tools used while building
+## On the AI tooling
 
-Built this with **Claude Code** in plan mode + edit mode. The 6-hour build broke into clean phased commits — `git log` reads like a build progression:
+Built with Claude Code in plan-then-execute mode. The discipline that paid off was **planning before code** — architecting + resolving spec ambiguity (mode semantics, risk definition, reviewer selection) up front, before touching the editor. Each phase commit then executed against a clear design intent rather than the model improvising.
 
-```
-Phase 1: scaffold + observability skeleton
-Phase 2: GitHub fetch + diff chunking
-Phase 3: LLM analysis + risk aggregation + decision
-Phase 4: real GitHub writes (approve / escalate / reviewers)
-Phase 5: README, tests, polish
-+ fix(escalate): downgrade REQUEST_CHANGES -> COMMENT on self-PR
-+ feat(cli): --dry-run flag
-+ fix(quality): hoist no-speculation rule + consolidate reviewer comments
-+ feat(cost): Anthropic prompt caching on analyze + rebalanced prompt
-+ feat(cost): Haiku triage node — cheap pre-filter before Sonnet analyze
-```
-
-The planning step (architecting + resolving spec ambiguity before code) was where most of the value came from. Each subsequent commit then executed against a clear design intent.
-
----
-
-## How to run against any PR
-
-1. Clone, install, fill `.env`
-2. Pick any open GitHub PR you have write access to. Dry-run first:
-   `python main.py <PR_URL> --mode conservative --dry-run`
-3. Read the structured dry-run report. It shows exactly what Yenta would post — nothing leaves your terminal.
-4. Drop `--dry-run` to post for real.
-5. Open the PR on GitHub and confirm: review body, line comments (if any), reviewer assignments (if escalated).
-6. Open the Langfuse trace and confirm every LLM call's prompt + output + tokens + cache hits are visible.
+The dogfooding loop in this README is the second-order win from that discipline: the architecture was clean enough that I could meaningfully *use* the agent against itself, find a real bug, and ship a targeted fix in <30 LOC. That's much harder when the codebase has been improvised.
