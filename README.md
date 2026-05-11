@@ -1,6 +1,10 @@
-# PR Review Agent
+# Yenta 👵
 
-A LangGraph-powered agent that reviews a GitHub pull request end-to-end: triages every changed file with Claude Haiku, deep-reviews the non-trivial ones with Claude Sonnet, and either **auto-approves** or **escalates** to specific human reviewers with file/line-cited comments.
+> _Yiddish, n. A matchmaker. Also: a busybody who has opinions about your business._
+
+A LangGraph PR review agent that triages every changed file with Claude Haiku, deep-reviews the non-trivial ones with Claude Sonnet, and either **auto-approves** or **escalates** to specific human reviewers with file/line-cited comments.
+
+The name is on-the-nose: Yenta's main job is **matching PRs to the right humans**. She reads the diff, forms an opinion, and (in conservative mode) tells you exactly who should look at what — citing CODEOWNERS, falling back to `git blame`, drawing focus areas from the actual findings. In aggressive mode she's faster to wave you through.
 
 Built for the [Numeo AI Product Engineering Challenge](https://github.com/numeo-ai/numeo-ai-product-engineering-challenge) inside the 6-hour cap.
 
@@ -30,7 +34,7 @@ The 2nd vs 3rd review shows the mode flag in action on the same risk score: 24 e
 
 ```bash
 git clone <this repo>
-cd pr-review-agent
+cd yenta
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env  # fill in your tokens

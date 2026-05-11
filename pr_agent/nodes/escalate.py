@@ -13,6 +13,7 @@ them and lists the specific files/lines they should focus on, drawn from
 findings that touched paths they own (or, for blame-fallback reviewers,
 the files they recently committed to).
 """
+
 from __future__ import annotations
 
 import json
@@ -33,7 +34,9 @@ from ..state import Finding, GraphState, ReviewerAssignment
 
 log = logging.getLogger(__name__)
 
-_SUMMARY_PROMPT = Path(__file__).resolve().parent.parent.parent / "prompts" / "summary.md"
+_SUMMARY_PROMPT = (
+    Path(__file__).resolve().parent.parent.parent / "prompts" / "summary.md"
+)
 
 
 def _select_reviewers(
@@ -85,13 +88,14 @@ def _select_reviewers(
 
     for login in chosen:
         paths = user_to_paths.get(login, [])
-        source = "CODEOWNERS" if rules and any(
-            login in [u for u in owners_by_file.get(p, [])] for p in paths
-        ) else "recent commit history (blame fallback)"
+        source = (
+            "CODEOWNERS"
+            if rules
+            and any(login in [u for u in owners_by_file.get(p, [])] for p in paths)
+            else "recent commit history (blame fallback)"
+        )
         # Findings the model already flagged on this user's paths.
-        owned_findings = [
-            f for f in state.findings if f.file_path in paths
-        ]
+        owned_findings = [f for f in state.findings if f.file_path in paths]
         focus = _focus_text(owned_findings, paths)
         assignments.append(
             ReviewerAssignment(
@@ -114,8 +118,9 @@ def _focus_text(findings: list[Finding], paths: list[str]) -> str:
             lines.append(f"- **{f.severity}/{f.category}** {loc} — {f.rationale}")
         return "\n".join(lines)
     if paths:
-        return "No specific findings on your paths; please give them a sanity pass:\n" + "\n".join(
-            f"- `{p}`" for p in paths[:10]
+        return (
+            "No specific findings on your paths; please give them a sanity pass:\n"
+            + "\n".join(f"- `{p}`" for p in paths[:10])
         )
     return "Please review the PR end-to-end."
 
@@ -187,7 +192,7 @@ def _agent_signature(state: GraphState) -> str:
     bd = ", ".join(f"{k}={v}" for k, v in state.risk_breakdown.items())
     return (
         f"\n\n---\n"
-        f"_Posted by the PR Review Agent — mode: `{state.mode}` · "
+        f"_Posted by `Yenta`, the PR Agent. — mode: `{state.mode}` · "
         f"risk: `{state.risk_score}` ({bd}) · "
         f"decision: `{state.decision}`._"
     )
@@ -225,11 +230,7 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
     if assignments:
         sections = []
         for a in assignments:
-            sections.append(
-                f"### @{a.login}\n"
-                f"_{a.reason}_\n\n"
-                f"{a.focus}"
-            )
+            sections.append(f"### @{a.login}\n" f"_{a.reason}_\n\n" f"{a.focus}")
         combined_body = (
             "## Reviewer assignments\n\n"
             "Tagging each reviewer with the specific files / findings to focus on:\n\n"
@@ -283,13 +284,14 @@ def escalate_node(state: GraphState) -> dict[str, Any]:
         # Retry without line comments rather than dropping the whole review.
         log.warning("review with line comments failed (%s); retrying body-only", e)
         try:
-            review = gh.post_review(
-                pr, body=body, event=event, comments=[]
-            )
+            review = gh.post_review(pr, body=body, event=event, comments=[])
             review_url = getattr(review, "html_url", state.pr_meta.url)
         except GithubException as e2:
             log.exception("review post failed even body-only")
-            return {**pending, "errors": state.errors + [f"escalate review failed: {e2}"]}
+            return {
+                **pending,
+                "errors": state.errors + [f"escalate review failed: {e2}"],
+            }
 
     # --- request reviewers on GitHub ---
     logins = [a.login for a in assignments]

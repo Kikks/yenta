@@ -56,7 +56,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
     )
 
-    p = argparse.ArgumentParser(description="PR Review Agent")
+    p = argparse.ArgumentParser(
+        description="Yenta — a LangGraph PR review agent. Matches PRs to reviewers.",
+    )
     p.add_argument("pr_url", help="https://github.com/<org>/<repo>/pull/<n>")
     p.add_argument(
         "--mode",

@@ -4,6 +4,7 @@ We deliberately don't approve our own PRs (GitHub returns 422). If the
 agent's token belongs to the PR author, we degrade gracefully to a
 COMMENT review so the demo still shows a real GitHub write.
 """
+
 from __future__ import annotations
 
 import json
@@ -22,7 +23,9 @@ from ..state import GraphState
 
 log = logging.getLogger(__name__)
 
-_SUMMARY_PROMPT = Path(__file__).resolve().parent.parent.parent / "prompts" / "summary.md"
+_SUMMARY_PROMPT = (
+    Path(__file__).resolve().parent.parent.parent / "prompts" / "summary.md"
+)
 
 
 def _render_summary(state: GraphState, llm: LLM) -> str:
@@ -71,7 +74,7 @@ def _render_summary(state: GraphState, llm: LLM) -> str:
 def _agent_signature(state: GraphState) -> str:
     return (
         f"\n\n---\n"
-        f"_Posted by the PR Review Agent — mode: `{state.mode}` · "
+        f"_Posted by `Yenta`, the PR Agent. — mode: `{state.mode}` · "
         f"risk: `{state.risk_score}` · "
         f"decision: `{state.decision}`._"
     )
